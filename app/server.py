@@ -11466,7 +11466,7 @@ class MonitorApp:
                     return
                 if path == "/api/notify/report_image":
                     try:
-                        png = app.api_notify_report_image()
+                        png = app.api_notify_report_image(self.headers)
                     except (RuntimeError, ValueError) as exc:
                         self._send(503, str(exc).encode("utf-8"), "text/plain; charset=utf-8")
                     else:
@@ -12235,23 +12235,16 @@ class MonitorApp:
         ch = data.get("channel") if isinstance(data, dict) else ""
         return notify_test(self.data_dir, ch)
 
-    def api_notify_report_image(self):
+    def api_notify_report_image(self, headers):
         """Preview the saved report selection without sending a message."""
-        from utils.report_image import render_png
+        from utils.report_image import capture_png
 
         cfg = notify_load(self.data_dir)
-        selected = set(cfg.get("report_modules") or [])
-        modules = [key for key in REPORT_MODULE_ORDER if key in selected]
-        extra = {"weather": self.api_weather()} if "weather" in selected else {}
-        payload = notify_report_collect(self.collector.get_snapshot(), self.data_dir, cfg,
-                                        extra=extra, vms_monitor=self.vms)
-        if "power" in selected:
-            stats = self.api_power_stats()
-            for period in ("today", "month"):
-                payload["power"][period + "_kwh"] = stats["energy"].get(period + "_kwh")
-                payload["power"][period + "_yuan"] = stats["cost"].get(period + "_yuan")
-        labels = {key: label for key, (label, _) in REPORT_MODULES.items()}
-        return render_png(payload, modules, labels, time.time(), detail=cfg.get("report_detail") != "brief")
+        host = {"0.0.0.0": "127.0.0.1", "::": "[::1]"}.get(self.host, self.host)
+        if ":" in host and not host.startswith("["):
+            host = "[" + host + "]"
+        return capture_png("http://%s:%d" % (host, self.port), cfg["report_modules"],
+                           self._get_cookie_sid(headers) if self._auth_required() else "")
 
     def api_notify_report_test(self, data):
         """立刻发一条定时推送报告（测试用），用当前采集快照组装。"""
