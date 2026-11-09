@@ -46,6 +46,7 @@ const barOpts = (days, series, fmt, h) => ({
 function powerParts(p) {
   // iDRAC 给的是整机电源输出，拆不出 CPU/内存/硬盘，直接一条整机实测
   if (p.source === 'idrac') return [['整机实测', +p.total || 0, 'var(--d-p)']];
+  if (p.source === 'ups') return [['UPS 输出', +p.total || 0, 'var(--d-p)']];
   const parts = [];
   if (ok(p.package)) parts.push(['CPU 封装', +p.package, 'var(--d-p)']);
   if (ok(p.dram)) parts.push(['内存', +p.dram, 'color-mix(in srgb, var(--d-p) 55%, var(--card))']);
@@ -56,7 +57,7 @@ function powerParts(p) {
   return parts;
 }
 const ppI = c => c === 'hatch' ? '<i class="hatch"></i>' : `<i style="background:${c}"></i>`;
-const SRC_TXT = { idrac: 'iDRAC 实测', rapl: '硬件 RAPL', estimated: '模型估算' };
+const SRC_TXT = { idrac: 'iDRAC 实测', rapl: '硬件 RAPL', estimated: '模型估算', ups: 'UPS 输出实测' };
 /** 本月预计：已用电量 + 剩余时长 × 平均功率 */
 const monthProj = (mk, o) => { const a = avgW(o); if (!ok(mk) || !a) return null; const d = new Date(), end = new Date(d.getFullYear(), d.getMonth() + 1, 1); return { kwh: mk + a.w * (end - d) / 3.6e9, w: a.w, basis: a.basis }; };
 /** 全年估算：平均功率 × 8760 小时（只是估算，口径写在副标题里） */
@@ -70,6 +71,7 @@ defineModule({
         <div class="label">实时功耗<span class="pill" style="margin-left:auto" data-ref="src"></span></div>
         <div class="dnum huge" style="margin-top:18px"><span class="dm" data-ref="w"></span><span class="unit">W</span></div>
         <div class="sub" style="margin-top:6px" data-ref="wSub"></div>
+        <div class="sub" style="margin-top:6px" data-ref="upsSub"></div>
         <div class="stack" style="margin-top:22px;height:12px" data-ref="stack"></div>
         <div class="legend" data-ref="leg"></div>
       </div>
@@ -113,9 +115,13 @@ defineModule({
     const x = m.x, p = o.power || {}, has = pwrOk(o), ps = S.pstats, rate = ps && ps.cost ? ps.cost.rate_yuan_per_kwh : (S.cfg && S.cfg.power_rate_yuan);
     dnum(x.w, has ? +p.total : null, F.d1);
     setText(x.src, has ? (SRC_TXT[p.source] || '来源未知') : '不可用');
-    setText(x.wSub, !has ? '无法读取 RAPL，也无法估算整机功耗'
+    setText(x.wSub, !has ? (p.source === 'ups' ? 'UPS 读数不可用，已暂停功率历史记录' : '无法读取 RAPL，也无法估算整机功耗')
+      : p.source === 'ups' ? `UPS 输出 ${F.d2(p.voltage)} V × ${(+p.current).toFixed(3)} A；用于用电量与电费计算`
       : p.source === 'idrac' ? `iDRAC 实测整机输出${ok(p.capacity) ? ` · 电源容量 ${F.int(p.capacity)} W` : ''}${ok(p.min) && ok(p.max) ? ` · 近 1 分钟 ${F.int(p.min)}–${F.int(p.max)} W` : ''}`
         : p.source === 'rapl' ? '整机 = CPU 封装（RAPL 实测）+ 内存 + 主板底座 + 活动硬盘' : '无 RAPL：按 TDP × CPU 占用 + 硬盘 + 网卡 + 主板底座估算');
+    const up = o.ups_power || {}, selected = !!(S.cfg && +S.cfg.power_use_ups);
+    x.upsSub.hidden = selected || (!up.ok && !(S.cfg && S.cfg.power_ups_name));
+    setText(x.upsSub, up.ok ? `UPS 输出 ${F.d1(up.total)} W · 当前未用于用电量与电费计算` : 'UPS 输出功率不可用');
     const parts = has ? powerParts(p) : [], sig = parts.map(q => q[0]).join();
     if (m.psig !== sig) { m.psig = sig; x.stack.innerHTML = parts.map(q => ppI(q[2])).join(''); }
     parts.forEach((q, i) => { if (x.stack.children[i]) x.stack.children[i].style.flexGrow = q[1].toFixed(2); });
@@ -134,71 +140,6 @@ defineModule({
   },
 });
 
-/* ---------------------------------------------------------------------
-   06b UPS — /api/ups（实时）+ /api/history/ups_out_w（曲线）
-   --------------------------------------------------------------------- */
-const UPS_RANGE_LINES = [
-  { id: 'ups_out_w', label: '输出功率', unit: 'W', color: 'var(--e-coral)' },
-  { id: 'ups_out_v', label: '输出电压', unit: 'V', color: 'var(--e-teal)' },
-  { id: 'ups_chg', label: '电量', unit: '%', color: 'var(--e-blue)' },
-  { id: 'ups_load', label: '负载', unit: '%', color: 'var(--d-p)' },
-  { id: 'ups_bat_v', label: '电池电压', unit: 'V', color: 'var(--fill-2)' },
-];
-defineModule({
-  id: 'ups', page: 'overview', dc: 'io', kicker: 'UPS', title: 'UPS 电源', dek: '输入/输出电压、输出功率、负载、电量、续航',
-  actions: () => detailBtn('ups'),
-  build(body, m) {
-    body.innerHTML = `<div class="ups">
-      <div class="card pad tap" data-sheet="ups" tabindex="0" role="button">
-        <div class="label">UPS 状态<span class="pill" style="margin-left:auto" data-ref="stPill"></span></div>
-        <div class="dnum huge" style="margin-top:18px"><span class="dm" data-ref="outW"></span><span class="unit">W</span></div>
-        <div class="sub" style="margin-top:6px" data-ref="sub">未检测到 UPS</div>
-        <div class="chart-mini" style="margin-top:20px;height:56px" data-ref="mini"></div>
-      </div>
-      <div class="stat-cells">
-        <div class="stat-cell"><div class="eyebrow">输出电压</div><div class="dnum"><span class="dm" data-ref="outV"></span><span class="unit">V</span></div><div class="sub" data-ref="outLbl"></div></div>
-        <div class="stat-cell"><div class="eyebrow">电量</div><div class="dnum"><span class="dm" data-ref="chg"></span><span class="unit">%</span></div><div class="sub" data-ref="chgLbl"></div></div>
-        <div class="stat-cell"><div class="eyebrow">负载</div><div class="dnum"><span class="dm" data-ref="load"></span><span class="unit">%</span></div><div class="sub" data-ref="loadLbl"></div></div>
-        <div class="stat-cell"><div class="eyebrow">续航</div><div class="dnum"><span class="dm" data-ref="rt"></span><span class="unit">分</span></div><div class="sub" data-ref="rtLbl"></div></div>
-      </div>
-    </div>`;
-    m.x = collect(body);
-  },
-  async update(o, m) {
-    const x = m.x;
-    if (!m.lastUpsTs || Date.now() - m.lastUpsTs > 5000) {
-      m.lastUpsTs = Date.now();
-      try { m.upsSnap = await API.get('/api/ups'); } catch (e) { m.upsSnap = null; }
-    }
-    const d = m.upsSnap;
-    if (!d || !d.ok || d.state === 'off') {
-      dot(x.outW).set(null); dot(x.outV).set(null); dot(x.chg).set(null); dot(x.load).set(null); dot(x.rt).set(null);
-      setText(x.stPill, d && d.upsc ? 'UPS 未启用' : '未检测到 UPS');
-      setText(x.sub, d && d.upsc ? '开关未开启' : '需启用飞牛「UPS 电源管理」安装 nut-client');
-      setText(x.outLbl, ''); setText(x.chgLbl, ''); setText(x.loadLbl, ''); setText(x.rtLbl, '');
-      return;
-    }
-    const lv = d.live || {}, dv = d.device || {};
-    const labels = lv.labels || [];
-    const cls = lv.st & 4 ? 'crit' : (lv.st & 1024 || lv.st & 64 ? 'warn' : 'ok');
-    setHTML(x.stPill, `<span class="pill ${cls}">${labels.map(esc).join(' · ') || '市电正常'}</span>`);
-    dnum(x.outW, lv.out_w, F.int);
-    setText(x.sub, `${esc((dv.mfr || '') + (dv.model ? ' ' + dv.model : dv.name || 'UPS'))} · 输入 ${lv.in_v != null ? F.d1(lv.in_v) + ' V' : '--'}`);
-    dnum(x.outV, lv.out_v, F.d1); setText(x.outLbl, lv.out_a != null ? `电流 ${F.d1(lv.out_a)} A` : '');
-    dnum(x.chg, lv.chg, F.int); setText(x.chgLbl, lv.bat_v != null ? `电池 ${F.d1(lv.bat_v)} V` : '');
-    dnum(x.load, lv.load, F.int); setText(x.loadLbl, '额定容量 ' + (dv.va || '--'));
-    dnum(x.rt, lv.rt ? Math.round(lv.rt / 60) : null, F.int);
-    setText(x.rtLbl, lv.temp != null ? `电池 ${F.d1(lv.temp)} ℃` : '');
-    // 小曲线：输出功率历史
-    try {
-      const h = await Hist.get('ups_out_w', 'all', 600000).catch(() => null);
-      const pts = (h && h.points) || [];
-      if (!m.miniChart && pts.length) m.miniChart = new MiniSparkline(x.mini, { color: 'var(--e-coral)', yMin: 0 });
-      if (m.miniChart) { m.miniChart.setData(pts.map(p => [p[0], p[1]])); x.mini.hidden = false; }
-      else x.mini.hidden = true;
-    } catch (e) { x.mini.hidden = true; }
-  },
-});
 const ipOf = (o, iface) => { const r = ((o.system || {}).ips || []).find(p => p.iface === iface); return r ? (r.ipv4 || [])[0] || (r.ipv6 || [])[0] || '' : ''; };
 const speedOf = (o, iface) => { const r = (((o.hardware || {}).net) || []).find(p => p.name === iface); return r && +r.speed_mbps > 0 ? +r.speed_mbps : 0; };
 const speedTxt = mb => mb >= 1000 ? (mb / 1000 >= 10 ? Math.round(mb / 1000) : +(mb / 1000).toFixed(1)) + ' GbE' : mb + ' Mb/s';

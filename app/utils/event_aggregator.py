@@ -10,7 +10,7 @@
   - 全局同类合并：开启开关后，其它噪音类事件（文件、应用、Docker、
     相册、收藏、歌单等）按「事件类型」在窗口内合并
 
-安全 / 告警 / 登录 / 存储故障 / UPS 等事件始终即时推送，不进聚合。
+安全 / 告警 / 登录 / 存储故障等事件始终即时推送，不进聚合。
 """
 
 import threading
@@ -20,7 +20,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from utils import event_formatter
 
 
-# 永不聚合：安全、登录、存储故障、资源告警、备份结果、UPS 等必须即时到达
+# 永不聚合：安全、登录、存储故障、资源告警、备份结果等必须即时到达
 NEVER_AGGREGATE = frozenset({
     "LoginSucc", "LoginSucc2FA1", "LoginFail", "Logout",
     "SSH_INVALID_USER", "SSH_AUTH_FAILED", "SSH_LOGIN_SUCCESS", "SSH_DISCONNECTED",
@@ -29,7 +29,6 @@ NEVER_AGGREGATE = frozenset({
     "FoundDisk", "InsertDisk", "EjectDisk",
     "CPU_USAGE_ALARM", "CPU_USAGE_RESTORED",
     "MEMORY_USAGE_ALARM", "MEMORY_USAGE_RESTORED", "CPU_TEMPERATURE_ALARM",
-    "UPS_ONBATT", "UPS_ONBATT_LOWBATT", "UPS_ONLINE", "UPS_ENABLE", "UPS_DISABLE",
     "BACKUP_TASK_SUCCESS", "BACKUP_TASK_FAILED", "BACKUP_TASK_PARTIAL_SUCCESS",
     "APP_CRASH", "APP_UPDATE_FAILED", "APP_START_FAILED_LOCAL_APP_RUN_EXCEPTION",
     "APP_AUTO_START_FAILED_DOCKER_NOT_AVAILABLE",

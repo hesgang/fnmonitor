@@ -31,6 +31,8 @@
    "power_nic_fixed_w": "number",
    "power_rate_yuan": "number",
    "power_tdp_w": "number",
+   "power_ups_name": "str",
+   "power_use_ups": "number",
    "retention_days": "number",
    "threshold_notify": "number",
    "traffic_exclude_bridge": "number",
@@ -153,6 +155,8 @@
    "power_nic_fixed_w": "number",
    "power_rate_yuan": "number",
    "power_tdp_w": "number",
+   "power_ups_name": "str",
+   "power_use_ups": "number",
    "retention_days": "number",
    "threshold_notify": "number",
    "traffic_exclude_bridge": "number",
@@ -221,6 +225,11 @@
    "system": "null"
   },
   "ts": "number",
+  "ups_power": {
+   "ok": "bool",
+   "reason": "str",
+   "source": "str"
+  },
   "uptime": "number"
  },
  "/api/power_stats": {

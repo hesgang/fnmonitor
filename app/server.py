@@ -48,14 +48,6 @@ _app_dir = os.path.dirname(os.path.abspath(__file__))
 if _app_dir not in sys.path:
     sys.path.insert(0, _app_dir)
 from utils import push_history as _push_history
-# UPS 电源采集（NUT upsc 客户端）
-try:
-    from utils import ups as _ups_mod
-    _UPS_AVAILABLE = True
-except Exception as _ups_e:
-    _ups_mod = None
-    _UPS_AVAILABLE = False
-    print("[fnmonitor] UPS 模块不可用：%s" % str(_ups_e)[:120])
 # fnOS 日志事件监控运行时（P3）
 try:
     from utils import monitor_runtime as _monitor_runtime_mod
@@ -105,7 +97,7 @@ UPDATE_REPO = "MisiteQ/fnmonitor"          # GitHub 仓库：在线检查更新 
 UPDATE_CHECK_INTERVAL = 6 * 3600           # 自动更新检查周期（6 小时）
 # 下载加速：直连 GitHub 下载域在国内常不可达，失败后自动依次尝试公共加速镜像
 GH_MIRRORS = ["", "https://gh-proxy.com/", "https://ghfast.top/", "https://ghproxy.net/", "https://gh.llkk.cc/"]
-DEFAULT_CONFIG = {"interval": 10, "retention_days": 7, "port": 0, "history_interval": 60, "weather_city": "", "data_dir": "", "update_autocheck": 1, "update_autodownload": 0, "update_autoupdate": 0, "traffic_exclude_bridge": 0, "power_tdp_w": 65, "power_rate_yuan": 0.6, "power_disk_typical_w": 8, "power_nic_fixed_w": 5, "power_base_w": 8, "disk_standby_protect": 1, "disk_scan_enabled": 1, "disk_scan_interval_h": 6, "disk_scan_notify": 0, "threshold_notify": 0, "open_mode": "url", "monthly_summary_enabled": 0, "auth_enabled": 0, "auth_password_hash": "", "auth_session_days": 7, "ec_fan_probe": 0}
+DEFAULT_CONFIG = {"interval": 10, "retention_days": 7, "port": 0, "history_interval": 60, "weather_city": "", "data_dir": "", "update_autocheck": 1, "update_autodownload": 0, "update_autoupdate": 0, "traffic_exclude_bridge": 0, "power_tdp_w": 65, "power_rate_yuan": 0.6, "power_disk_typical_w": 8, "power_nic_fixed_w": 5, "power_base_w": 8, "power_use_ups": 0, "power_ups_name": "", "disk_standby_protect": 1, "disk_scan_enabled": 1, "disk_scan_interval_h": 6, "disk_scan_notify": 0, "threshold_notify": 0, "open_mode": "url", "monthly_summary_enabled": 0, "auth_enabled": 0, "auth_password_hash": "", "auth_session_days": 7, "ec_fan_probe": 0}
 # 提醒阈值（v2.18.0 新增）：前端「设置 → 提醒阈值」写入 ui.json 的 thresholds 字段，
 # 界面着色 / 趋势阈值线 / 首页结论与健康报告共用同一口径。键 → (默认值, 最小, 最大)
 THRESHOLD_SPEC = {
@@ -1543,6 +1535,61 @@ def estimate_power(cpu_percent, disks_active, nics, tdp_w, disk_w, nic_w):
         return round(base + disks_active * disk_w + nics * nic_w, 2)
     except Exception:
         return round(tdp_w * 0.3, 2)
+
+
+def read_ups_output_power(name=""):
+    """Read local NUT output power. Missing data must never become zero watts."""
+    name = str(name or "").strip()
+    if name and not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", name):
+        return {"ok": False, "source": "ups", "reason": "invalid_name"}
+    try:
+        if not name:
+            listed = subprocess.run(["upsc", "-l"], capture_output=True, text=True,
+                                    timeout=3, check=True).stdout.splitlines()
+            names = [line.strip() for line in listed if re.fullmatch(r"[A-Za-z0-9._-]{1,64}", line.strip())]
+            if len(names) != 1:
+                return {"ok": False, "source": "ups", "reason": "choose_device" if names else "no_device"}
+            name = names[0]
+        output = subprocess.run(["upsc", name], capture_output=True, text=True,
+                                timeout=3, check=True).stdout
+    except (OSError, subprocess.SubprocessError):
+        return {"ok": False, "source": "ups", "reason": "read_failed"}
+    values = {}
+    for line in output.splitlines():
+        key, sep, value = line.partition(":")
+        if sep:
+            values[key.strip()] = value.strip()
+    try:
+        voltage = float(values["output.voltage"])
+        current = float(values["output.current"])
+    except (KeyError, ValueError):
+        return {"ok": False, "source": "ups", "reason": "missing_output"}
+    watts = voltage * current
+    if not all(math.isfinite(v) and v >= 0 for v in (voltage, current, watts)):
+        return {"ok": False, "source": "ups", "reason": "invalid_output"}
+    return {"ok": True, "source": "ups", "total": round(watts, 2),
+            "voltage": voltage, "current": current, "device": name}
+
+
+def list_ups_devices():
+    """List UPS devices exposed by the local NUT daemon only."""
+    try:
+        output = subprocess.run(["upsc", "-l"], capture_output=True, text=True,
+                                timeout=3, check=True).stdout
+    except (OSError, subprocess.SubprocessError):
+        return {"ok": False, "devices": [], "error": "NUT 设备列表读取失败"}
+    names = list(dict.fromkeys(line.strip() for line in output.splitlines()
+                               if re.fullmatch(r"[A-Za-z0-9._-]{1,64}", line.strip())))[:16]
+    devices = []
+    for name in names:
+        model = ""
+        try:
+            model = subprocess.run(["upsc", name, "ups.model"], capture_output=True,
+                                   text=True, timeout=3, check=True).stdout.strip()[:80]
+        except (OSError, subprocess.SubprocessError):
+            pass
+        devices.append({"name": name, "model": model})
+    return {"ok": True, "devices": devices}
 
 
 # ===================== 硬盘休眠状态检测（不唤醒 STANDBY 硬盘） =====================
@@ -3645,14 +3692,13 @@ REPORT_MODULES = {
     "docker":   ("Docker 容器", "容器"),
     "vms":      ("虚拟机", "容器"),
     "idrac":    ("iDRAC 硬件", "硬件"),
-    "ups":      ("UPS", "硬件"),
     "weather":  ("天气", "其他"),
 }
 REPORT_MODULE_ORDER = ["system", "cpu", "memory", "load", "gpu",
                        "disk", "smart", "storage",
                        "network", "temp", "fan", "power",
                        "docker", "vms",
-                       "idrac", "ups",
+                       "idrac",
                        "weather"]
 # 推送周期类型
 REPORT_SCHEDULE_TYPES = {
@@ -5777,7 +5823,7 @@ def notify_report_collect(snapshot, data_dir, cfg, extra=None, vms_monitor=None)
         payload["network"] = {"count": len(net_list), "interfaces": net_list}
     if "power" in mods:
         pwr = snap.get("power") or {}
-        src_map = {"rapl": "RAPL 实测", "idrac": "iDRAC", "estimated": "模型估算", "unknown": "不可用"}
+        src_map = {"rapl": "RAPL 实测", "idrac": "iDRAC", "estimated": "模型估算", "ups": "UPS 输出实测", "unknown": "不可用"}
         # kWh / 电费不在采集快照里（快照只有实时瓦数），由调用方经 extra["power_stats"] 注入
         ps = extra.get("power_stats") or {}
         payload["power"] = {
@@ -5848,34 +5894,6 @@ def notify_report_collect(snapshot, data_dir, cfg, extra=None, vms_monitor=None)
                 payload["idrac"] = {"configured": False}
         except Exception:
             payload["idrac"] = {"configured": False}
-    if "ups" in mods:
-        ups = snap.get("ups") or extra.get("ups") or {}
-        if not ups and _UPS_AVAILABLE:
-            try:
-                _s = _ups_mod.ups_latest()
-                if _s and _s.get("ok"):
-                    ups = _s
-            except Exception:
-                pass
-        if ups:
-            live = ups.get("live") or {}
-            dev = ups.get("device") or {}
-            ups_name = dev.get("model") or dev.get("name") or "--"
-            if dev.get("mfr"):
-                ups_name = dev["mfr"] + " " + ups_name
-            labels = live.get("labels") or []
-            ups_status = " · ".join(labels) if labels else (live.get("status") or "--")
-            payload["ups"] = {
-                "present": True, "status": ups_status,
-                "name": ups_name,
-                "in_v": live.get("in_v"), "out_v": live.get("out_v"),
-                "out_a": live.get("out_a"), "out_w": live.get("out_w"),
-                "load": live.get("load"), "chg": live.get("chg"),
-                "rt_min": round(live.get("rt") / 60) if live.get("rt") else None,
-                "bat_v": live.get("bat_v"), "temp": live.get("temp"),
-            }
-        else:
-            payload["ups"] = {"present": False, "status": "--"}
     if "weather" in mods:
         w = snap.get("weather") or extra.get("weather") or {}
         payload["weather"] = {
@@ -6149,42 +6167,6 @@ def notify_report_build(cfg, payload, now):
             _kv("地址", i.get("host", "--"))
         else:
             _kv("状态", "❌ 未配置")
-
-    if "ups" in payload:
-        u = payload["ups"]
-        _sec("🔋", "UPS 电源")
-        if u.get("present"):
-            _kv("设备", u.get("name", "--"))
-            _kv("状态", u.get("status", "--"))
-            out = ""
-            if u.get("out_v") is not None:
-                out += "输出电压 %.1f V" % u["out_v"]
-            if u.get("out_a") is not None:
-                out += " · 电流 %.2f A" % u["out_a"] if out else "电流 %.2f A" % u["out_a"]
-            if u.get("out_w") is not None:
-                out += " · 功率 %d W" % u["out_w"]
-            if out:
-                _kv("输出", out)
-            parts = []
-            if u.get("in_v") is not None:
-                parts.append("输入 %.1f V" % u["in_v"])
-            if u.get("load") is not None:
-                parts.append("负载 %.0f%%" % u["load"])
-            if parts:
-                _kv("电网", " · ".join(parts))
-            batp = []
-            if u.get("chg") is not None:
-                batp.append("电量 %.0f%%" % u["chg"])
-            if u.get("bat_v") is not None:
-                batp.append("电压 %.2f V" % u["bat_v"])
-            if u.get("rt_min") is not None:
-                batp.append("续航约 %d min" % u["rt_min"])
-            if batp:
-                _kv("电池", " · ".join(batp))
-            if u.get("temp") is not None:
-                _kv("温度", "%.1f ℃" % u["temp"])
-        else:
-            _kv("状态", "UPS 未启用 / 未检测到")
 
     if "weather" in payload:
         w = payload["weather"]
@@ -8864,7 +8846,6 @@ MODULES = [
     {"id": "cron", "name": "定时任务", "cat": "系统服务", "units": ["cron", "crond"], "procs": ["cron", "crond"], "containers": []},
     {"id": "nginx", "name": "Web 服务 (Nginx)", "cat": "系统服务", "units": ["nginx"], "procs": ["nginx"], "containers": []},
     {"id": "smartd", "name": "磁盘健康 (SMART)", "cat": "系统服务", "units": ["smartd"], "procs": ["smartd"], "containers": []},
-    {"id": "ups", "name": "UPS 电源", "cat": "系统服务", "units": ["apcupsd", "nut-server"], "procs": ["apcupsd", "upsd"], "containers": []},
     {"id": "kvm", "name": "虚拟机 (KVM)", "cat": "系统服务", "units": ["libvirtd"], "procs": ["libvirtd"], "containers": []},
     {"id": "log", "name": "系统日志", "cat": "系统服务", "units": ["rsyslog", "syslog-ng"], "procs": ["rsyslogd", "syslog-ng"], "containers": []},
     # 飞牛内置应用（通过应用中心安装目录 / systemd 单元 / 进程 / 容器识别）
@@ -9577,13 +9558,13 @@ class History:
             return float(span or 86400)
         return max(60.0, time.time() - first)
 
-    def query_series(self, metric, seconds, span=None, max_points=720):
+    def query_series(self, metric, seconds, span=None, max_points=720, since=0):
         """单指标趋势：按时间桶在 SQL 内求平均，最多返回约 max_points 个点。
         数据点少于 max_points 时每个桶只含一个采样，结果与原始数据完全一致。"""
-        key = ("qs", metric, seconds)
+        key = ("qs", metric, seconds, since)
         if self._asleep():
             return self._memo(key, None)
-        cutoff = (time.time() - seconds) if seconds else 0
+        cutoff = max((time.time() - seconds) if seconds else 0, since)
         try:
             conn = self._connect()
             try:
@@ -10181,6 +10162,7 @@ class Collector(threading.Thread):
         self._last_fans_ts = 0.0
         self._last_power = {"ok": False}
         self._last_power_ts = 0.0
+        self._last_ups_power = {"ok": False, "source": "ups", "reason": "not_read"}
         # iDRAC：配置每 30 秒看一次（改了立刻生效），数据只读后台 Poller 的缓存
         self._idrac_cfg = {}
         self._idrac_cfg_ts = 0.0
@@ -10423,7 +10405,7 @@ class Collector(threading.Thread):
                     temps["disks"].append({"name": "阵列 " + str(_p.get("loc")),
                                            "temp": _p.get("temp")})
         snapshot["temp"] = temps
-        # ---- 实时功耗（每 10 秒）：iDRAC 整机读数 > RAPL > 估算模型 ----
+        # ---- 实时功耗：UPS 随采集周期更新，否则 iDRAC > RAPL > 估算 ----
         # 必须在采集线程统一给出快照值：「实时功耗」与「功耗统计」两个面板都读这里，
         # 否则 RAPL 不可用的机器（多数 AMD/ARM）会出现面板显示 0W/不可用、
         # 而趋势图却有估算数据的自相矛盾。
@@ -10433,7 +10415,10 @@ class Collector(threading.Thread):
         # 仅 2-3W，且通常没有 DRAM 域），不等于整机功耗。整机 total = package
         # + dram + 主板等固定底座(power_base_w) + 活动硬盘数 * 单盘功耗，休眠盘不计。
         try:
-            if not _skip("power") and now - self._last_power_ts >= 10:
+            ups_enabled = bool(int(self.config.get("power_use_ups", 0) or 0))
+            if not _skip("power") and ups_enabled:
+                self._last_ups_power = read_ups_output_power(self.config.get("power_ups_name", ""))
+            if not _skip("power") and (ups_enabled or now - self._last_power_ts >= 10):
                 # 活动硬盘数：硬盘详情每 60 秒标注 state；未知(unknown)按活动计，
                 # 与旧行为一致，明确 standby 的盘才剔除
                 disks_active = sum(1 for d in (self._last_disks_detail or [])
@@ -10441,7 +10426,10 @@ class Collector(threading.Thread):
                 disk_w_unit = float(self.config.get("power_disk_typical_w", 8) or 0)
                 disks_w = round(disks_active * disk_w_unit, 2)
                 idr = self._idrac_fast()
-                if idr and _nz(idr.get("power_watts")) is not None:
+                if ups_enabled:
+                    # 选定 UPS 后不静默回退估算值，避免历史 kWh 混入另一来源。
+                    self._last_power = dict(self._last_ups_power)
+                elif idr and _nz(idr.get("power_watts")) is not None:
                     self._last_power = {
                         "ok": True, "source": "idrac",
                         "total": round(float(idr["power_watts"]), 2),
@@ -10485,6 +10473,7 @@ class Collector(threading.Thread):
         except Exception:
             self._last_power = {"ok": False, "source": "unknown"}
         snapshot["power"] = self._last_power
+        snapshot["ups_power"] = self._last_ups_power
         # ---- GPU 实时（每 10 秒） ----
         try:
             if now - self._last_gpu_ts >= 10:
@@ -10548,7 +10537,7 @@ class Collector(threading.Thread):
                 rows.append((now, "temp_mb", _r2(temps["system"])))
             # ---- 功耗（历史维度）：与接口实时快照同源（RAPL 实测 / 模型估算） ----
             pw = self._last_power or {}
-            if pw.get("ok") and pw.get("total"):
+            if pw.get("ok") and pw.get("total") is not None:
                 rows.append((now, "power", _r2(pw.get("total"))))
                 if pw.get("source") == "estimated":
                     # 估算值额外写一份 power_est，导出 CSV 时可区分实测/估算口径
@@ -10558,23 +10547,6 @@ class Collector(threading.Thread):
             valid_rpm = [f["rpm"] for f in fans if f.get("rpm")]
             if valid_rpm:
                 rows.append((now, "fan_avg", _r2(sum(valid_rpm) / len(valid_rpm))))
-            # ---- UPS 电源（历史维度） ----
-            if _UPS_AVAILABLE:
-                try:
-                    _us = _ups_mod.ups_latest()
-                    if _us and _us.get("ok"):
-                        _lv = _us.get("live") or {}
-                        for _k, _mk in (
-                            ("out_w", "ups_out_w"), ("out_v", "ups_out_v"),
-                            ("chg", "ups_chg"), ("load", "ups_load"),
-                            ("bat_v", "ups_bat_v"),
-                        ):
-                            if _lv.get(_k) is not None:
-                                rows.append((now, _mk, _r2(_lv[_k])))
-                        if _lv.get("rt") is not None:
-                            rows.append((now, "ups_rt_min", _r2(round(float(_lv["rt"]) / 60.0))))
-                except Exception:
-                    pass
             # ---- 磁盘 IO（历史维度：读/写 MB/s） ----
             for it in diskio:
                 rows.append((now, "diskio_r:" + str(it.get("name", "?")),
@@ -11272,7 +11244,7 @@ class MonitorApp:
                      "/api/notify/save", "/api/notify/test", "/api/notify/report_test", "/api/disk_scan/now",
                      "/api/idrac/save", "/api/idrac/test", "/api/idrac/refresh",
                      "/api/scan_log/clear",
-                     "/api/ups/save"}
+                     }
 
         class Handler(BaseHTTPRequestHandler):
             # HTTP/1.1 长连接：浏览器复用 TCP 连接，避免每请求新建线程；timeout 保证空闲连接
@@ -11580,12 +11552,6 @@ class MonitorApp:
                 if path == "/api/idrac":
                     self._json(app.api_idrac_get(qs))
                     return
-                if path == "/api/ups":
-                    self._json(app.api_ups_get())
-                    return
-                if path == "/api/ups/list":
-                    self._json(app.api_ups_list())
-                    return
                 if path == "/api/idrac/sel":
                     self._json(app.api_idrac_sel(qs))
                     return
@@ -11609,6 +11575,9 @@ class MonitorApp:
                     metric = (qs.get("metric") or ["cpu"])[0]
                     range_ = (qs.get("range") or ["1h"])[0]
                     self._json(app.api_history(metric, range_))
+                    return
+                if path == "/api/ups/devices":
+                    self._json(list_ups_devices())
                     return
                 if path == "/api/system":
                     self._json(app.api_system())
@@ -11830,9 +11799,6 @@ class MonitorApp:
                     return
                 if path == "/api/idrac/save":
                     self._json(app.api_idrac_save(data))
-                    return
-                if path == "/api/ups/save":
-                    self._json(app.api_ups_save(data))
                     return
                 if path == "/api/idrac/test":
                     self._json(app.api_idrac_test(data))
@@ -12380,54 +12346,6 @@ class MonitorApp:
         return {"ok": True, "error": "", "config": idrac_public(cfg),
                 "message": "已保存" if cfg.get("enabled") else "已保存（iDRAC 未启用）"}
 
-    # ---------- UPS 电源 ----------
-    def api_ups_get(self):
-        """UPS 实时快照 + 配置。未启用/不可用时返回 ok=False + 默认配置。"""
-        if not _UPS_AVAILABLE:
-            return {"ok": False, "enabled": 0, "state": "no_module",
-                    "error": "UPS 模块不可用",
-                    "device": {}, "live": {}, "config": {},
-                    "upsc": "", "ups_list": []}
-        cfg = _ups_mod.ups_load(self.data_dir)
-        if not cfg.get("enabled"):
-            return _ups_mod.ups_off_snapshot(cfg)
-        snap = _ups_mod.ups_latest()
-        if not snap:
-            snap = {"ok": False, "enabled": 1, "state": "init", "ts": 0,
-                    "stale": 0, "error": "采集线程尚未产出数据",
-                    "device": {}, "live": {}, "ups_list": [], "poll": cfg.get("poll_interval")}
-        snap["config"] = _ups_mod.ups_public(cfg)
-        snap["upsc"] = _ups_mod._upsc_path()
-        return snap
-
-    def api_ups_save(self, data):
-        """保存 UPS 配置（开关 + UPS 名称 + 通知事件）。"""
-        if not _UPS_AVAILABLE:
-            return {"ok": False, "error": "UPS 模块不可用"}
-        cfg, err = _ups_mod.ups_save(self.data_dir, data if isinstance(data, dict) else {})
-        if err:
-            return {"ok": False, "error": err}
-        print("[fnmonitor] UPS 配置已更新：%s name=%s interval=%ss"
-              % ("开" if cfg.get("enabled") else "关", cfg.get("ups_name") or "自动",
-                 cfg.get("poll_interval") or 5))
-        return {"ok": True, "error": "", "config": _ups_mod.ups_public(cfg),
-                "message": "已保存" if cfg.get("enabled") else "已保存（UPS 未启用）"}
-
-    def api_ups_list(self):
-        """列出当前 NUT 发现的 UPS 实例名（供设置页下拉选择）。"""
-        if not _UPS_AVAILABLE:
-            return {"ok": False, "error": "UPS 模块不可用", "upsc": "", "ups_list": []}
-        exe = _ups_mod._upsc_path()
-        if not exe:
-            return {"ok": False, "error": "未找到 upsc 命令（需启用飞牛「UPS 电源管理」）",
-                    "upsc": "", "ups_list": []}
-        try:
-            names = _ups_mod.ups_list()
-        except _ups_mod.UpsError as e:
-            return {"ok": False, "error": e.message, "hint": e.hint,
-                    "upsc": exe, "ups_list": []}
-        return {"ok": True, "upsc": exe, "ups_list": list(names)}
-
     def api_idrac_refresh_static(self):
         """设置页「刷新固定信息」：后台重读一轮 CPU / 内存 / 阵列卡 / 盘 / 卷 / 固件。
 
@@ -12587,11 +12505,17 @@ class MonitorApp:
         now = time.time()
         latest_ts = rows[-1][0] if rows else 0
         if now - latest_ts > 60:
-            val = self._live_value(metric, self.collector.get_snapshot())
-            if val is not None:
-                rows = list(rows) + [(now, val)]
-        return {"metric": metric, "range": range_, "points": [[t, round(v, 2) if isinstance(v, float) else v]
-                                                             for t, v in rows]}
+            snap = self.collector.get_snapshot()
+            val = self._live_value(metric, snap)
+            live_ts = float(snap.get("ts") or now)
+            power = snap.get("power") or {}
+            right_source = (metric != "power" or
+                            (power.get("source") == "ups") == bool(int(self.config.get("power_use_ups", 0) or 0)))
+            if val is not None and right_source and live_ts > latest_ts:
+                rows = list(rows) + [(live_ts, val)]
+        result = {"metric": metric, "range": range_,
+                  "points": [[t, round(v, 2) if isinstance(v, float) else v] for t, v in rows]}
+        return result
 
     def _live_value(self, metric, snap):
         """从最新实时快照取指定指标的当前值（用于历史不足时的趋势兜底）。"""
@@ -13089,7 +13013,7 @@ class MonitorApp:
         onoff = lambda x: 1 if str(x).lower() in ("1", "true", "on") else 0
         for k in ("update_autocheck", "update_autodownload", "update_autoupdate", "traffic_exclude_bridge",
                   "disk_standby_protect", "monthly_summary_enabled", "auth_enabled", "ec_fan_probe",
-                  "disk_scan_enabled", "disk_scan_notify", "threshold_notify"):
+                  "disk_scan_enabled", "disk_scan_notify", "threshold_notify", "power_use_ups"):
             if k in data:
                 updates[k] = onoff(data[k])
         # 硬盘巡检间隔：0 = 关闭；其余就近取档位（6/12/24/72/168 小时）
@@ -13109,6 +13033,11 @@ class MonitorApp:
                         updates[k] = max(0.0, min(500.0, fv))
                 except Exception:
                     pass
+        if "power_ups_name" in data:
+            name = str(data["power_ups_name"] or "").strip()
+            if name and not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", name):
+                return {"ok": False, "error": "UPS 名称只能包含字母、数字、点、下划线和短横线"}, 200, None
+            updates["power_ups_name"] = name
         if "data_dir" in data:
             nd = str(data.get("data_dir") or "").strip()
             if nd:
@@ -13148,6 +13077,10 @@ class MonitorApp:
         for k in remove:
             self.config[k] = ""
         self._overview_bytes = b""
+        if "power_use_ups" in updates or "power_ups_name" in updates:
+            self.collector._last_power_ts = 0.0
+            self._power_stats_cache = None
+            self._hist_cache.clear()
         open_mode_changed = False
         new_mode = str(updates.get("open_mode", "")).lower()
         if new_mode in ("iframe", "url"):
@@ -13303,7 +13236,7 @@ class MonitorApp:
         snap = self.collector.get_snapshot()
         power = snap.get("power", {"ok": False})
         source = power.get("source", "unknown")
-        power_w = power.get("total", 0) if power.get("ok") else 0
+        power_w = power.get("total") if power.get("ok") else None
         # kWh 计算：从 power 历史积分
         hist_interval = int(self.config.get("history_interval", 60))
         import datetime
@@ -13328,7 +13261,7 @@ class MonitorApp:
             energy_basis = "history"
         # 开机累计估算
         uptime = snap.get("uptime", 0)
-        boot_kwh = round(power_w * uptime / 3_600_000, 4) if uptime > 0 else 0.0
+        boot_kwh = round(power_w * uptime / 3_600_000, 4) if power_w is not None and uptime > 0 else None
         # 电费
         rate = float(self.config.get("power_rate_yuan", 0.6))
         # 硬盘休眠状态（60s 缓存），并与「硬盘信息」(lsblk 物理盘) 校对，只保留物理硬盘
@@ -14263,7 +14196,7 @@ def load_config(data_dir):
     # 开关类（在线更新 / 流量 / 休眠保护 / 上月汇总 / 鉴权 / EC 风扇探测 / 硬盘巡检）必须随配置恢复
     for k in ("update_autocheck", "update_autodownload", "update_autoupdate", "traffic_exclude_bridge",
               "disk_standby_protect", "monthly_summary_enabled", "auth_enabled", "ec_fan_probe",
-              "disk_scan_enabled", "disk_scan_notify", "threshold_notify"):
+              "disk_scan_enabled", "disk_scan_notify", "threshold_notify", "power_use_ups"):
         if k in user:
             cfg[k] = onoff(user[k])
     if "disk_scan_interval_h" in user:
@@ -14280,6 +14213,9 @@ def load_config(data_dir):
                 pass
     if "weather_city" in user:
         cfg["weather_city"] = clean_text(user["weather_city"], 64)
+    name = str(user.get("power_ups_name") or "").strip()
+    if not name or re.fullmatch(r"[A-Za-z0-9._-]{1,64}", name):
+        cfg["power_ups_name"] = name
     if "data_dir" in user:
         cfg["data_dir"] = str(user["data_dir"]).strip()
     # fnOS 日志事件监控配置（独立节点，整体透传，具体字段在 api_monitor_get/save 内清洗）
@@ -14564,17 +14500,6 @@ def main():
     # 同线程会把风扇和功耗的 20 秒刷新整轮堵住
     idrac_slow = IdracSlowPoller(app.collector.data_dir)
     idrac_slow.start()
-    # ── UPS 电源采集（NUT upsc）────────────────────────────────────
-    if _UPS_AVAILABLE:
-        try:
-            _ups_mod.ups_poller_ensure(app.collector.data_dir, config)
-            # 注入通知函数：让 UpsPoller 能调用我们已有的 7 渠道通知体系
-            _ups_mod.ups_apply_notify_fn(notify_load, notify_send_all)
-            print("[fnmonitor] UPS 电源采集线程已启动"
-                  if (_ups_mod.ups_load(app.collector.data_dir).get("enabled"))
-                  else "[fnmonitor] UPS 电源未启用")
-        except Exception as _ups_start_e:
-            print("[fnmonitor] UPS 启动异常（不影响主流程）：%s" % str(_ups_start_e)[:120])
     # ── P3: fnOS 日志事件监控运行时 ──────────────────────────────
     _monitor_runtime = None
     if _MONITOR_RUNTIME_AVAILABLE:

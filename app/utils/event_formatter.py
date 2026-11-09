@@ -30,8 +30,6 @@ MONITOR_EVENT_IDS = frozenset({
     "CPU_USAGE_ALARM", "CPU_USAGE_RESTORED",
     "MEMORY_USAGE_ALARM", "MEMORY_USAGE_RESTORED",
     "CPU_TEMPERATURE_ALARM",
-    # UPS
-    "UPS_ONBATT", "UPS_ONBATT_LOWBATT", "UPS_ONLINE", "UPS_ENABLE", "UPS_DISABLE",
     # 磁盘电源/IO
     "DiskWakeup", "DiskSpindown", "DISK_IO_ERR",
     # 备份
@@ -82,14 +80,13 @@ def filter_events(events: List[Any]) -> List[Any]:
 
 # 默认选中事件（推荐给首次启用日志事件监控的用户）
 # 与 FNMessageBots 的默认口径对齐：不含应用启动/停止等生命周期噪音；
-# UPS 启停、SSH 服务开关、WAN IP 变更默认不勾选（按需在界面里自行开启）。
+# SSH 服务开关、WAN IP 变更默认不勾选（按需在界面里自行开启）。
 DEFAULT_SELECTED_EVENTS = [
     "LoginSucc", "LoginFail", "Logout", "LoginSucc2FA1",
     "FoundDisk", "InsertDisk", "EjectDisk", "StorageBroken", "STORAGE_DEGRADED",
     "APP_CRASH", "APP_UPDATE_FAILED",
     "CPU_USAGE_ALARM", "CPU_USAGE_RESTORED", "CPU_TEMPERATURE_ALARM",
     "MEMORY_USAGE_ALARM", "MEMORY_USAGE_RESTORED",
-    "UPS_ONBATT", "UPS_ONBATT_LOWBATT", "UPS_ONLINE",
     "DiskWakeup", "DiskSpindown",
     "SSH_INVALID_USER", "SSH_AUTH_FAILED", "SSH_LOGIN_SUCCESS",
     "SSH_DISCONNECTED", "SSH_OPEN_TIMEOUT",
@@ -125,10 +122,6 @@ EVENT_CATEGORIES = [
         "CPU_USAGE_ALARM", "CPU_USAGE_RESTORED",
         "MEMORY_USAGE_ALARM", "MEMORY_USAGE_RESTORED",
         "CPU_TEMPERATURE_ALARM",
-    ]),
-    ("UPS", [
-        "UPS_ONBATT", "UPS_ONBATT_LOWBATT", "UPS_ONLINE",
-        "UPS_ENABLE", "UPS_DISABLE",
     ]),
     ("备份", [
         "BACKUP_TASK_SUCCESS", "BACKUP_TASK_FAILED", "BACKUP_TASK_PARTIAL_SUCCESS",
@@ -210,11 +203,6 @@ EVENT_TITLES = {
     'MEMORY_USAGE_ALARM': '内存使用率告警：{usage}%',
     'MEMORY_USAGE_RESTORED': '内存使用率恢复：{usage}%',
     'CPU_TEMPERATURE_ALARM': 'CPU 温度告警：{temp}°C',
-    'UPS_ONBATT': 'UPS 切换到电池供电',
-    'UPS_ONBATT_LOWBATT': 'UPS 低电量，即将自动关机',
-    'UPS_ONLINE': 'UPS 恢复市电供电',
-    'UPS_ENABLE': '已开启 UPS 支持',
-    'UPS_DISABLE': '已关闭 UPS 支持',
     'DiskWakeup': '磁盘唤醒 {name}',
     'DiskSpindown': '磁盘休眠 {name}',
     'DISK_IO_ERR': '磁盘 IO 错误 {dev}（{err_cnt} 次）',
