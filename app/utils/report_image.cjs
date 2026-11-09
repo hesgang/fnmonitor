@@ -26,7 +26,8 @@ async function capture({ html, modules, data, sampledAt }) {
     throw new Error('日报图需要安装 Playwright');
   }
   const origin = 'http://fnmonitor-report.invalid';
-  const included = new Set([...selected].map(id => sections[id]).filter(Boolean));
+  const order = [...new Set(modules.map(id => id === 'weather' ? id : sections[id]))];
+  const included = new Set(order.filter(id => id !== 'weather'));
   let browser;
   try {
     browser = await chromium.launch({
@@ -91,10 +92,23 @@ async function capture({ html, modules, data, sampledAt }) {
         await section.locator('[data-ref="a"] > *').first().waitFor({ state: 'attached' });
       }
     }
-    await page.evaluate(({ keep, chosen, sampledAt }) => {
+    await page.evaluate(({ order, chosen, sampledAt }) => {
       const layout = document.querySelector('#layout-overview');
+      const blocks = new Map();
       for (const section of layout.querySelectorAll(':scope > [data-mod]')) {
-        if (!keep.includes(section.dataset.mod)) section.style.display = 'none';
+        blocks.set(section.dataset.mod, section);
+        if (!order.includes(section.dataset.mod)) section.style.display = 'none';
+      }
+      if (chosen.includes('weather')) blocks.set('weather', document.querySelector('#hero [data-ref="wx"]'));
+      let number = 0;
+      for (const id of order) {
+        const block = blocks.get(id);
+        if (!block) continue;
+        layout.append(block);
+        const index = block.querySelector('[data-ref="idx"]');
+        if (index && !block.classList.contains('mod-headless')) {
+          index.textContent = String(++number).padStart(2, '0');
+        }
       }
       const hide = selectors => {
         for (const selector of selectors) {
@@ -110,13 +124,12 @@ async function capture({ html, modules, data, sampledAt }) {
       }
       if (!chosen.includes('disk') && !chosen.includes('smart')) hide(['[data-mod="storage"] .nas']);
       if (!chosen.includes('storage')) hide(['[data-mod="storage"] .pool', '[data-mod="storage"] [data-ref="raid"]']);
-      if (chosen.includes('weather')) layout.prepend(document.querySelector('#hero [data-ref="wx"]'));
       layout.style.padding = '16px';
       const stamp = document.createElement('div');
       stamp.className = 'eyebrow';
       stamp.textContent = '采集时间 ' + sampledAt;
       layout.prepend(stamp);
-    }, { keep: [...included], chosen: [...selected], sampledAt });
+    }, { order, chosen: [...selected], sampledAt });
     await page.evaluate(async () => {
       await document.fonts.ready;
       await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));

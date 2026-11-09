@@ -12242,8 +12242,8 @@ class MonitorApp:
         entry = self._static_entry("index.html")
         if entry is None:
             raise RuntimeError("安装包缺少首页文件")
-        modules = notify_load(self.data_dir)["report_modules"]
-        selected = set(modules)
+        selected = set(notify_load(self.data_dir)["report_modules"])
+        modules = [module for module in REPORT_MODULE_ORDER if module in selected]
         overview = json.loads(self.api_overview())
         ts = overview.get("ts")
         if not ts:
