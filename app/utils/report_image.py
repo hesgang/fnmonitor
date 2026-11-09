@@ -9,8 +9,8 @@ import threading
 _CAPTURE_LOCK = threading.Lock()
 
 
-def capture_png(base_url, modules, session_id=""):
-    request = json.dumps({"url": base_url, "modules": modules, "session": session_id})
+def capture_png(html, modules, data, sampled_at):
+    request = json.dumps({"html": html, "modules": modules, "data": data, "sampledAt": sampled_at})
     script = Path(__file__).with_suffix(".cjs")
     if not _CAPTURE_LOCK.acquire(blocking=False):
         raise RuntimeError("正在生成日报图，请稍后重试")

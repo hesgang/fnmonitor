@@ -10,7 +10,7 @@ const sections = {
 };
 const selector = id => `[data-mod="${id}"]`;
 
-async function capture({ url, modules, session }) {
+async function capture({ html, modules, data, sampledAt }) {
   const selected = new Set(modules);
   const unsupported = { docker: 'Docker 容器', vms: '虚拟机', idrac: 'iDRAC 硬件' };
   const missing = [...selected].filter(id => !Object.hasOwn(sections, id) && id !== 'weather');
@@ -25,7 +25,7 @@ async function capture({ url, modules, session }) {
   } catch {
     throw new Error('日报图需要安装 Playwright');
   }
-  const origin = new URL(url).origin;
+  const origin = 'http://fnmonitor-report.invalid';
   const included = new Set([...selected].map(id => sections[id]).filter(Boolean));
   let browser;
   try {
@@ -42,25 +42,23 @@ async function capture({ url, modules, session }) {
       viewport: { width: 1440, height: 1000 },
       reducedMotion: 'reduce',
       serviceWorkers: 'block',
+      offline: true,
     });
-    if (session) await context.addCookies([{ name: 'fnmp_sid', value: session, url: origin, httpOnly: true }]);
     await context.route('**/*', async route => {
       const request = route.request();
       const target = new URL(request.url());
-      // Prevent UI writes and requests to other hosts from the capture session.
-      if (target.origin !== origin || request.method() !== 'GET' || target.pathname === '/api/notify/report_image') {
-        return route.abort();
+      // Every document and API response is supplied in memory.
+      if (target.origin !== origin || request.method() !== 'GET') return route.abort();
+      if (request.isNavigationRequest() && target.pathname === '/') {
+        return route.fulfill({ contentType: 'text/html; charset=utf-8', body: html });
       }
-      if (target.pathname === '/api/ui') {
-        const response = await route.fetch({ maxRedirects: 0 });
-        if (!response.ok()) return route.fulfill({ response });
-        const data = await response.json();
-        const hidden = data.ui?.hidden;
-        if (Array.isArray(hidden?.overview)) hidden.overview = hidden.overview.filter(id => !included.has(id));
-        return route.fulfill({ response, json: data });
-      }
-      return route.continue();
+      const key = target.pathname + target.search;
+      if (!Object.hasOwn(data, key)) return route.abort();
+      return route.fulfill({ json: data[key] });
     });
+
+    const hidden = data['/api/ui']?.ui?.hidden;
+    if (Array.isArray(hidden?.overview)) hidden.overview = hidden.overview.filter(id => !included.has(id));
 
     const page = await context.newPage();
     page.setDefaultTimeout(12000);
@@ -68,6 +66,7 @@ async function capture({ url, modules, session }) {
     if (selected.has('power')) endpoints.push('/api/power_stats');
     if (selected.has('network')) endpoints.push('/api/traffic');
     if (selected.has('weather')) endpoints.push('/api/weather');
+    if (included.has('storage')) endpoints.push('/api/disk_health');
     const pending = endpoints.map(path => page.waitForResponse(r => {
       const target = new URL(r.url());
       return target.origin === origin && target.pathname === path && r.ok();
@@ -92,7 +91,7 @@ async function capture({ url, modules, session }) {
         await section.locator('[data-ref="a"] > *').first().waitFor({ state: 'attached' });
       }
     }
-    await page.evaluate(({ keep, chosen }) => {
+    await page.evaluate(({ keep, chosen, sampledAt }) => {
       const layout = document.querySelector('#layout-overview');
       for (const section of layout.querySelectorAll(':scope > [data-mod]')) {
         if (!keep.includes(section.dataset.mod)) section.style.display = 'none';
@@ -113,7 +112,11 @@ async function capture({ url, modules, session }) {
       if (!chosen.includes('storage')) hide(['[data-mod="storage"] .pool', '[data-mod="storage"] [data-ref="raid"]']);
       if (chosen.includes('weather')) layout.prepend(document.querySelector('#hero [data-ref="wx"]'));
       layout.style.padding = '16px';
-    }, { keep: [...included], chosen: [...selected] });
+      const stamp = document.createElement('div');
+      stamp.className = 'eyebrow';
+      stamp.textContent = '采集时间 ' + sampledAt;
+      layout.prepend(stamp);
+    }, { keep: [...included], chosen: [...selected], sampledAt });
     await page.evaluate(async () => {
       await document.fonts.ready;
       await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));

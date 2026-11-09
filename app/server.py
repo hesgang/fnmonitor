@@ -11466,7 +11466,7 @@ class MonitorApp:
                     return
                 if path == "/api/notify/report_image":
                     try:
-                        png = app.api_notify_report_image(self.headers)
+                        png = app.api_notify_report_image()
                     except (RuntimeError, ValueError) as exc:
                         self._send(503, str(exc).encode("utf-8"), "text/plain; charset=utf-8")
                     else:
@@ -12235,16 +12235,39 @@ class MonitorApp:
         ch = data.get("channel") if isinstance(data, dict) else ""
         return notify_test(self.data_dir, ch)
 
-    def api_notify_report_image(self, headers):
-        """Preview the saved report selection without sending a message."""
+    def api_notify_report_image(self):
+        """Render the bundled overview from local data without an HTTP round trip."""
         from utils.report_image import capture_png
 
-        cfg = notify_load(self.data_dir)
-        host = {"0.0.0.0": "127.0.0.1", "::": "[::1]"}.get(self.host, self.host)
-        if ":" in host and not host.startswith("["):
-            host = "[" + host + "]"
-        return capture_png("http://%s:%d" % (host, self.port), cfg["report_modules"],
-                           self._get_cookie_sid(headers) if self._auth_required() else "")
+        entry = self._static_entry("index.html")
+        if entry is None:
+            raise RuntimeError("安装包缺少首页文件")
+        modules = notify_load(self.data_dir)["report_modules"]
+        selected = set(modules)
+        overview = json.loads(self.api_overview())
+        ts = overview.get("ts")
+        if not ts:
+            raise RuntimeError("尚无采集快照，请等首次采集完成后再试")
+        data = {
+            "/api/overview": overview,
+            "/api/ui": self.api_ui_get(),
+            "/api/config": self.api_config(),
+        }
+        if selected & {"disk", "smart", "storage"}:
+            data["/api/disk_health"] = self.api_disk_health()
+        if "power" in selected:
+            data["/api/power_stats"] = self.api_power_stats()
+        if "network" in selected:
+            data["/api/traffic"] = self.api_traffic()
+        if selected & {"power", "network"}:
+            data["/api/daily?days=30"] = self.api_daily(30)
+        if "weather" in selected:
+            data["/api/weather"] = self.api_weather()
+        for metric, report_modules in (("cpu", {"cpu", "load"}), ("mem", {"memory"})):
+            if selected & report_modules:
+                data[f"/api/history?metric={metric}&range=1h"] = self.api_history(metric, "1h")
+        sampled_at = time.strftime("%Y-%m-%d %H:%M:%S %z", time.localtime(ts))
+        return capture_png(entry[0].decode("utf-8"), modules, data, sampled_at)
 
     def api_notify_report_test(self, data):
         """立刻发一条定时推送报告（测试用），用当前采集快照组装。"""
