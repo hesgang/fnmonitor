@@ -5114,7 +5114,7 @@ card.innerHTML = `<div class="set-sub">推送渠道</div>
 </div>
 <div class="rep-mods" data-ref="repMods"></div>
 </div></div>
-<div class="set-row" data-ref="repTestRow"><div><div class="lbl">测试报告</div><div class="hint" data-ref="hRepTest">点「发送测试报告」立刻发一条当前数据的汇总报告</div></div><div class="ctl"><button class="btn" type="button" data-ref="repTestBtn">发送测试报告</button></div></div>
+<div class="set-row" data-ref="repTestRow"><div><div class="lbl">测试报告</div><div class="hint" data-ref="hRepTest">图片预览使用已保存的报告模块，不会发送消息</div></div><div class="ctl"><a class="btn" href="/api/notify/report_image" target="_blank" rel="noopener">预览日报图</a><button class="btn" type="button" data-ref="repTestBtn">发送测试报告</button></div></div>
 <div class="set-row"><div><div class="lbl">保存设置</div><div class="hint" data-ref="hMsg"></div></div><div class="ctl"><button class="btn primary" type="button" data-ref="save">保存</button></div></div>`;
 const x = collect(card);
 function fieldHtml(chIdx, field, value) {

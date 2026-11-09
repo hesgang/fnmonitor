@@ -11464,6 +11464,14 @@ class MonitorApp:
                 if path == "/api/notify":
                     self._json(app.api_notify_get())
                     return
+                if path == "/api/notify/report_image":
+                    try:
+                        png = app.api_notify_report_image()
+                    except (RuntimeError, ValueError) as exc:
+                        self._send(503, str(exc).encode("utf-8"), "text/plain; charset=utf-8")
+                    else:
+                        self._send(200, png, "image/png", compress=False)
+                    return
                 if path == "/api/notify-stats":
                     # 推送历史统计：总条数 + 当日条数
                     try:
@@ -12226,6 +12234,24 @@ class MonitorApp:
         """立刻发一条测试消息。channel 传渠道 id，只测该渠道；不传测全部已启用渠道。"""
         ch = data.get("channel") if isinstance(data, dict) else ""
         return notify_test(self.data_dir, ch)
+
+    def api_notify_report_image(self):
+        """Preview the saved report selection without sending a message."""
+        from utils.report_image import render_png
+
+        cfg = notify_load(self.data_dir)
+        selected = set(cfg.get("report_modules") or [])
+        modules = [key for key in REPORT_MODULE_ORDER if key in selected]
+        extra = {"weather": self.api_weather()} if "weather" in selected else {}
+        payload = notify_report_collect(self.collector.get_snapshot(), self.data_dir, cfg,
+                                        extra=extra, vms_monitor=self.vms)
+        if "power" in selected:
+            stats = self.api_power_stats()
+            for period in ("today", "month"):
+                payload["power"][period + "_kwh"] = stats["energy"].get(period + "_kwh")
+                payload["power"][period + "_yuan"] = stats["cost"].get(period + "_yuan")
+        labels = {key: label for key, (label, _) in REPORT_MODULES.items()}
+        return render_png(payload, modules, labels, time.time(), detail=cfg.get("report_detail") != "brief")
 
     def api_notify_report_test(self, data):
         """立刻发一条定时推送报告（测试用），用当前采集快照组装。"""
