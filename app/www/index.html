@@ -5065,7 +5065,7 @@ const TYPE_LABELS = { mail: '邮件', sct: 'Server酱', wechat: '企业微信群
 feishu: '飞书群机器人', bark: 'Bark', pushplus: 'PushPlus', webhook: '通用 Webhook', wecom_app: '企业微信应用' };
 let f = { channels: [], hw_enabled: 0, hw_time: '08:00', notify_title_prefix: '飞牛监控',
 notify_dnd_enabled: 0, notify_dnd_start: '23:00', notify_dnd_end: '08:00', notify_minimal: 0,
-report_enabled: 0, report_detail: 'detail',
+report_enabled: 0, report_detail: 'detail', report_mode: 'text', report_image_modules: null,
 report_schedule: { type: 'daily', time: '08:00', weekday: 0, day: 1, interval_minutes: 60 },
 report_modules: ['system', 'cpu', 'memory', 'disk', 'network'] };
 const REPORT_MODS = {
@@ -5107,14 +5107,14 @@ card.innerHTML = `<div class="set-sub">推送渠道</div>
 <input class="textfield mono" type="number" min="1" max="31" data-ref="repDay" aria-label="日期" style="width:60px;display:none" placeholder="日">
 <input class="textfield mono" type="number" min="1" max="10080" data-ref="repInterval" aria-label="间隔分钟" style="width:90px;display:none" placeholder="分钟">
 </div></div>
-<div class="set-row wide" data-ref="repModRow"><div><div class="lbl">推送内容</div><div class="hint">勾选要在报告里推送的模块，并选择详细程度</div></div><div class="ctl" style="flex-direction:column;align-items:stretch;gap:10px">
+<div class="set-row wide" data-ref="repModRow"><div><div class="lbl">推送内容</div><div class="hint" data-ref="hRepMods">勾选要在报告里推送的模块</div></div><div class="ctl" style="flex-direction:column;align-items:stretch;gap:10px">
 <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
-<span style="font-size:11px;font-weight:600;color:var(--ink-3);letter-spacing:.02em">详细程度</span>
+<span style="font-size:11px;font-weight:600;color:var(--ink-3);letter-spacing:.02em">报告格式</span>
 <div data-ref="repDetailSeg"></div>
 </div>
 <div class="rep-mods" data-ref="repMods"></div>
 </div></div>
-<div class="set-row" data-ref="repTestRow"><div><div class="lbl">测试报告</div><div class="hint" data-ref="hRepTest">图片预览使用已保存的报告模块，不会发送消息</div></div><div class="ctl"><a class="btn" href="/api/notify/report_image" target="_blank" rel="noopener">预览日报图</a><button class="btn" type="button" data-ref="repTestBtn">发送测试报告</button></div></div>
+<div class="set-row" data-ref="repTestRow"><div><div class="lbl" data-ref="repTestLabel">测试报告</div><div class="hint" data-ref="hRepTest">使用已保存的文字报告设置发送测试</div></div><div class="ctl"><a class="btn" data-ref="repImageBtn" href="/api/notify/report_image" target="_blank" rel="noopener" style="display:none">预览日报图</a><button class="btn" type="button" data-ref="repTestBtn">发送测试报告</button></div></div>
 <div class="set-row"><div><div class="lbl">保存设置</div><div class="hint" data-ref="hMsg"></div></div><div class="ctl"><button class="btn primary" type="button" data-ref="save">保存</button></div></div>`;
 const x = collect(card);
 function fieldHtml(chIdx, field, value) {
@@ -5293,12 +5293,16 @@ el.setAttribute('aria-checked', String(on)); f[k] = on ? 1 : 0; sync();
 setSw(x.swMin, 'notify_minimal'); setSw(x.swDnd, 'notify_dnd_enabled'); setSw(x.swHw, 'hw_enabled');
 setSw(x.swRep, 'report_enabled');
 function renderRepMods() {
+const imageMode = f.report_mode === 'image';
+const key = imageMode ? 'report_image_modules' : 'report_modules';
 const cats = {};
 REPORT_MOD_ORDER.forEach(k => { const [label, cat] = REPORT_MODS[k]; (cats[cat] = cats[cat] || []).push([k, label]); });
-x.repMods.innerHTML = Object.entries(cats).map(([cat, items]) =>
-`<div style="margin-bottom:8px"><div class="set-sub" style="margin:0 0 4px">${esc(cat)}</div><div class="chips">` +
+const groups = imageMode ? (NB?.report_image_options || []).map(g => [g.title, g.options]) : Object.entries(cats);
+const chosen = f[key] ?? NB?.report_image_default ?? [];
+x.repMods.innerHTML = groups.map(([cat, items]) =>
+`<div style="margin-bottom:8px">${imageMode && items.length === 1 && items[0][1] === cat ? '' : `<div class="set-sub" style="margin:0 0 4px">${esc(cat)}</div>`}<div class="chips">` +
 items.map(([k, label]) => {
-const on = f.report_modules.includes(k);
+const on = chosen.includes(k);
 return `<button type="button" class="chip-t" data-repmod="${k}" aria-pressed="${on}">${esc(label)}</button>`;
 }).join('') + '</div></div>'
 ).join('');
@@ -5306,8 +5310,9 @@ x.repMods.querySelectorAll('[data-repmod]').forEach(btn => {
 btn.addEventListener('click', () => {
 const k = btn.dataset.repmod;
 const on = btn.getAttribute('aria-pressed') === 'true';
-if (on) { f.report_modules = f.report_modules.filter(m => m !== k); btn.setAttribute('aria-pressed', 'false'); }
-else { if (!f.report_modules.includes(k)) f.report_modules.push(k); btn.setAttribute('aria-pressed', 'true'); }
+const current = f[key] ?? chosen;
+f[key] = on ? current.filter(m => m !== k) : [...current, k];
+btn.setAttribute('aria-pressed', String(!on));
 });
 });
 }
@@ -5323,8 +5328,28 @@ x.repTime.addEventListener('input', () => { f.report_schedule.time = x.repTime.v
 x.repWeekday.addEventListener('change', () => { f.report_schedule.weekday = parseInt(x.repWeekday.value, 10); });
 x.repDay.addEventListener('input', () => { f.report_schedule.day = parseInt(x.repDay.value, 10) || 1; });
 x.repInterval.addEventListener('input', () => { f.report_schedule.interval_minutes = parseInt(x.repInterval.value, 10) || 60; });
-const repDetailSeg = makeSeg([['brief', '简略'], ['detail', '详细']], f.report_detail || 'detail', v => { f.report_detail = v; }, 'sm');
+const repDetailSeg = makeSeg([['brief', '简略'], ['detail', '详细'], ['image', '图片']], f.report_detail, v => {
+f.report_mode = v === 'image' ? 'image' : 'text';
+if (v === 'image') {
+if (f.report_image_modules === null && Array.isArray(NB?.report_image_default)) {
+f.report_image_modules = NB.report_image_default.slice();
+}
+} else {
+f.report_detail = v;
+}
+syncReportFormat();
+}, 'sm');
 x.repDetailSeg.appendChild(repDetailSeg);
+function syncReportFormat() {
+const isImage = f.report_mode === 'image';
+repDetailSeg.set(isImage ? 'image' : f.report_detail);
+renderRepMods();
+x.repImageBtn.style.display = isImage ? '' : 'none';
+x.repTestBtn.style.display = isImage ? 'none' : '';
+setText(x.hRepMods, isImage ? '按首页区块勾选卡片，出图顺序与此处一致' : '勾选要在报告里推送的模块');
+setText(x.repTestLabel, isImage ? '图片预览' : '测试报告');
+setText(x.hRepTest, isImage ? '保存后可预览所选卡片，定时报告目前仍以文字发送' : '使用已保存的文字报告设置发送测试');
+}
 x.repTestBtn.addEventListener('click', async () => {
 x.repTestBtn.disabled = true; setText(x.hRepTest, '正在发送测试报告…');
 try {
@@ -5360,9 +5385,8 @@ if (document.activeElement !== x.repTime) x.repTime.value = sch.time || '08:00';
 if (document.activeElement !== x.repWeekday) x.repWeekday.value = String(sch.weekday || 0);
 if (document.activeElement !== x.repDay) x.repDay.value = String(sch.day || 1);
 if (document.activeElement !== x.repInterval) x.repInterval.value = String(sch.interval_minutes || 60);
-repDetailSeg.set(f.report_detail || 'detail');
+syncReportFormat();
 syncRepSchVis();
-renderRepMods();
 const schLabel = ({ hourly: '每小时整点', daily: `每天 ${sch.time || '08:00'}`, weekly: `每周${'一二三四五六日'[sch.weekday || 0]} ${sch.time || '08:00'}`, monthly: `每月 ${sch.day || 1} 日 ${sch.time || '08:00'}`, interval: `每 ${sch.interval_minutes || 60} 分钟` })[sch.type || 'daily'] || '每天';
 setText(x.hRep, +f.report_enabled
 ? `已开启：${schLabel} 推送，${f.report_modules.length} 个模块`
@@ -5385,6 +5409,8 @@ notify_dnd_end: f.notify_dnd_end || '08:00',
 notify_minimal: f.notify_minimal,
 report_enabled: f.report_enabled,
 report_detail: f.report_detail || 'detail',
+report_mode: f.report_mode,
+report_image_modules: f.report_image_modules,
 report_schedule: Object.assign({}, f.report_schedule),
 report_modules: f.report_modules.slice(),
 };
@@ -5419,6 +5445,8 @@ f.notify_dnd_end = n.notify_dnd_end || '08:00';
 f.notify_minimal = n.notify_minimal || 0;
 f.report_enabled = n.report_enabled || 0;
 f.report_detail = (n.report_detail === 'brief' || n.report_detail === 'detail') ? n.report_detail : 'detail';
+f.report_mode = n.report_mode === 'image' ? 'image' : 'text';
+f.report_image_modules = Array.isArray(n.report_image_modules) ? n.report_image_modules.slice() : null;
 f.report_schedule = Object.assign({ type: 'daily', time: '08:00', weekday: 0, day: 1, interval_minutes: 60 }, n.report_schedule || {});
 f.report_modules = Array.isArray(n.report_modules) && n.report_modules.length ? n.report_modules.slice() : ['system', 'cpu', 'memory', 'disk', 'network'];
 renderAll();

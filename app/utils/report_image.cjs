@@ -1,24 +1,8 @@
 const fs = require('node:fs');
 
-const sections = {
-  system: 'host',
-  cpu: 'metrics', memory: 'metrics', load: 'metrics',
-  gpu: 'compute',
-  disk: 'storage', smart: 'storage', storage: 'storage',
-  network: 'network', power: 'energy',
-  temp: 'thermal', fan: 'thermal',
-};
 const selector = id => `[data-mod="${id}"]`;
 
-async function capture({ html, modules, data, sampledAt }) {
-  const selected = new Set(modules);
-  const unsupported = { docker: 'Docker 容器', vms: '虚拟机', idrac: 'iDRAC 硬件' };
-  const missing = [...selected].filter(id => !Object.hasOwn(sections, id) && id !== 'weather');
-  if (missing.length) {
-    throw new Error('总览没有这些报告模块的独立区块：' + missing.map(id => unsupported[id] || id).join('、'));
-  }
-  if (!selected.size) throw new Error('请至少选择一个报告模块');
-
+async function capture({ html, groups, data, sampledAt }) {
   let chromium;
   try {
     ({ chromium } = require('playwright'));
@@ -26,7 +10,7 @@ async function capture({ html, modules, data, sampledAt }) {
     throw new Error('日报图需要安装 Playwright');
   }
   const origin = 'http://fnmonitor-report.invalid';
-  const order = [...new Set(modules.map(id => id === 'weather' ? id : sections[id]))];
+  const order = groups.map(group => group.id);
   const included = new Set(order.filter(id => id !== 'weather'));
   let browser;
   try {
@@ -64,9 +48,9 @@ async function capture({ html, modules, data, sampledAt }) {
     const page = await context.newPage();
     page.setDefaultTimeout(12000);
     const endpoints = ['/api/overview', '/api/ui'];
-    if (selected.has('power')) endpoints.push('/api/power_stats');
-    if (selected.has('network')) endpoints.push('/api/traffic');
-    if (selected.has('weather')) endpoints.push('/api/weather');
+    if (included.has('energy')) endpoints.push('/api/power_stats');
+    if (included.has('network')) endpoints.push('/api/traffic');
+    if (order.includes('weather')) endpoints.push('/api/weather');
     if (included.has('storage')) endpoints.push('/api/disk_health');
     const pending = endpoints.map(path => page.waitForResponse(r => {
       const target = new URL(r.url());
@@ -92,44 +76,43 @@ async function capture({ html, modules, data, sampledAt }) {
         await section.locator('[data-ref="a"] > *').first().waitFor({ state: 'attached' });
       }
     }
-    await page.evaluate(({ order, chosen, sampledAt }) => {
+    await page.evaluate(({ groups, sampledAt }) => {
       const layout = document.querySelector('#layout-overview');
+      const order = groups.map(group => group.id);
       const blocks = new Map();
       for (const section of layout.querySelectorAll(':scope > [data-mod]')) {
         blocks.set(section.dataset.mod, section);
         if (!order.includes(section.dataset.mod)) section.style.display = 'none';
       }
-      if (chosen.includes('weather')) blocks.set('weather', document.querySelector('#hero [data-ref="wx"]'));
+      if (order.includes('weather')) blocks.set('weather', document.querySelector('#hero [data-ref="wx"]'));
       let number = 0;
-      for (const id of order) {
+      for (const { id, hide } of groups) {
         const block = blocks.get(id);
         if (!block) continue;
         layout.append(block);
+        for (const selector of hide) {
+          const card = block.querySelector(selector);
+          if (card) card.style.display = 'none';
+        }
+        if (hide.length) {
+          const description = block.querySelector('.mod-dek');
+          if (description) description.style.display = 'none';
+          for (const grid of block.querySelectorAll('.g-compute, .g-thermal, .g-2, .energy')) {
+            const visible = [...grid.children].filter(card => getComputedStyle(card).display !== 'none');
+            if (visible.length === 1) visible[0].style.gridColumn = '1 / -1';
+          }
+        }
         const index = block.querySelector('[data-ref="idx"]');
         if (index && !block.classList.contains('mod-headless')) {
           index.textContent = String(++number).padStart(2, '0');
         }
       }
-      const hide = selectors => {
-        for (const selector of selectors) {
-          const element = layout.querySelector(selector);
-          if (element) element.style.display = 'none';
-        }
-      };
-      const metrics = [];
-      if (chosen.includes('cpu') || chosen.includes('load')) metrics.push('cpu');
-      if (chosen.includes('memory')) metrics.push('mem');
-      for (const id of ['cpu', 'mem', 'disk', 'net', 'temp', 'pwr']) {
-        if (!metrics.includes(id)) hide([`[data-mod="metrics"] [data-m="${id}"]`]);
-      }
-      if (!chosen.includes('disk') && !chosen.includes('smart')) hide(['[data-mod="storage"] .nas']);
-      if (!chosen.includes('storage')) hide(['[data-mod="storage"] .pool', '[data-mod="storage"] [data-ref="raid"]']);
       layout.style.padding = '16px';
       const stamp = document.createElement('div');
       stamp.className = 'eyebrow';
       stamp.textContent = '采集时间 ' + sampledAt;
       layout.prepend(stamp);
-    }, { order, chosen: [...selected], sampledAt });
+    }, { groups, sampledAt });
     await page.evaluate(async () => {
       await document.fonts.ready;
       await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));

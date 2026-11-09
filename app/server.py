@@ -3606,6 +3606,8 @@ NOTIFY_DEFAULT = {
     # 定时推送报告
     "report_enabled": 0,
     "report_detail": "detail",  # brief=简略 / detail=详细
+    "report_mode": "text",
+    "report_image_modules": None,
     "report_schedule": {"type": "daily", "time": "08:00", "weekday": 0, "day": 1, "interval_minutes": 60},
     "report_modules": ["system", "cpu", "memory", "disk", "network"],
     "report_last_sent": 0,
@@ -3877,6 +3879,10 @@ def notify_load(data_dir):
         cfg["report_modules"] = mods or list(NOTIFY_DEFAULT["report_modules"])
     rd = str(user.get("report_detail") or "").strip().lower()
     cfg["report_detail"] = rd if rd in ("brief", "detail") else NOTIFY_DEFAULT["report_detail"]
+    cfg["report_mode"] = "image" if user.get("report_mode") == "image" else "text"
+    if isinstance(user.get("report_image_modules"), list):
+        from utils.report_image import image_selection
+        cfg["report_image_modules"] = image_selection(user["report_image_modules"])
     for k in ("report_last_sent", "report_last_fail"):
         if k in user:
             try:
@@ -3889,6 +3895,12 @@ def notify_load(data_dir):
 def notify_public(cfg):
     """对外配置：保密字段（密码 / URL / Token）换成「是否已填」，绝不回传明文。"""
     out = {k: v for k, v in cfg.items() if k != "channels"}
+    from utils.report_image import IMAGE_GROUPS, image_modules
+    out["report_image_options"] = [
+        {"title": title, "options": [[key, label] for key, label, _ in cards]}
+        for _, title, cards in IMAGE_GROUPS
+    ]
+    out["report_image_default"] = image_modules(cfg)
     pub_channels = []
     for ch in (cfg.get("channels") or []):
         ctype = ch.get("type")
@@ -3967,6 +3979,11 @@ def notify_save(data_dir, data, cur=None):
     if "report_detail" in data:
         rd = str(data["report_detail"] or "").strip().lower()
         cfg["report_detail"] = rd if rd in ("brief", "detail") else NOTIFY_DEFAULT["report_detail"]
+    if data.get("report_mode") in ("text", "image"):
+        cfg["report_mode"] = data["report_mode"]
+    if isinstance(data.get("report_image_modules"), list):
+        from utils.report_image import image_selection
+        cfg["report_image_modules"] = image_selection(data["report_image_modules"])
 
     # 渠道列表
     old_channels = {ch.get("id"): ch for ch in (cfg.get("channels") or [])}
@@ -12237,13 +12254,17 @@ class MonitorApp:
 
     def api_notify_report_image(self):
         """Render the bundled overview from local data without an HTTP round trip."""
-        from utils.report_image import capture_png
+        from utils.report_image import capture_png, image_modules
 
         entry = self._static_entry("index.html")
         if entry is None:
             raise RuntimeError("安装包缺少首页文件")
-        selected = set(notify_load(self.data_dir)["report_modules"])
-        modules = [module for module in REPORT_MODULE_ORDER if module in selected]
+        modules = image_modules(notify_load(self.data_dir))
+        if not modules:
+            raise ValueError("请在图片模式勾选至少一个区块并保存")
+        selected = set(modules)
+        power = selected & {"power", "power_cost", "daily_power"}
+        network = selected & {"interfaces", "container_traffic", "daily_traffic"}
         overview = json.loads(self.api_overview())
         ts = overview.get("ts")
         if not ts:
@@ -12253,19 +12274,16 @@ class MonitorApp:
             "/api/ui": self.api_ui_get(),
             "/api/config": self.api_config(),
         }
-        if selected & {"disk", "smart", "storage"}:
+        if selected & {"disk", "pool", "raid"}:
             data["/api/disk_health"] = self.api_disk_health()
-        if "power" in selected:
+        if power:
             data["/api/power_stats"] = self.api_power_stats()
-        if "network" in selected:
+        if network:
             data["/api/traffic"] = self.api_traffic()
-        if selected & {"power", "network"}:
+        if power or network:
             data["/api/daily?days=30"] = self.api_daily(30)
         if "weather" in selected:
             data["/api/weather"] = self.api_weather()
-        for metric, report_modules in (("cpu", {"cpu", "load"}), ("mem", {"memory"})):
-            if selected & report_modules:
-                data[f"/api/history?metric={metric}&range=1h"] = self.api_history(metric, "1h")
         sampled_at = time.strftime("%Y-%m-%d %H:%M:%S %z", time.localtime(ts))
         return capture_png(entry[0].decode("utf-8"), modules, data, sampled_at)
 
