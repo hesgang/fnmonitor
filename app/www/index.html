@@ -1119,6 +1119,7 @@ a{color:var(--ink-1)}
 .scanlog-bar .faint{font-size:12.5px}
 @media (max-width: 520px){.scanlog-bar .btn{flex:1}
 }
+.qiniu-help.btn{min-width:24px;min-height:24px;padding:0 5px;margin-inline-start:4px}
 .bays{display:flex;flex-wrap:wrap}
 .bays>.bay{flex:1 1 170px;min-width:0}
 .bays:has(.bays-empty){display:block}
@@ -5065,7 +5066,7 @@ const TYPE_LABELS = { mail: '邮件', sct: 'Server酱', wechat: '企业微信群
 feishu: '飞书群机器人', bark: 'Bark', pushplus: 'PushPlus', webhook: '通用 Webhook', wecom_app: '企业微信应用' };
 let f = { channels: [], hw_enabled: 0, hw_time: '08:00', notify_title_prefix: '飞牛监控',
 notify_dnd_enabled: 0, notify_dnd_start: '23:00', notify_dnd_end: '08:00', notify_minimal: 0,
-report_enabled: 0, report_detail: 'detail', report_mode: 'text', report_image_modules: null,
+report_enabled: 0, report_detail: 'detail', report_mode: 'text', report_image_modules: null, report_qiniu: {},
 report_schedule: { type: 'daily', time: '08:00', weekday: 0, day: 1, interval_minutes: 60 },
 report_modules: ['system', 'cpu', 'memory', 'disk', 'network'] };
 const REPORT_MODS = {
@@ -5114,7 +5115,8 @@ card.innerHTML = `<div class="set-sub">推送渠道</div>
 </div>
 <div class="rep-mods" data-ref="repMods"></div>
 </div></div>
-<div class="set-row" data-ref="repTestRow"><div><div class="lbl" data-ref="repTestLabel">测试报告</div><div class="hint" data-ref="hRepTest">使用已保存的文字报告设置发送测试</div></div><div class="ctl"><a class="btn" data-ref="repImageBtn" href="/api/notify/report_image" target="_blank" rel="noopener" style="display:none">预览日报图</a><button class="btn" type="button" data-ref="repTestBtn">发送测试报告</button></div></div>
+<div data-ref="repQiniu" hidden></div>
+<div class="set-row" data-ref="repTestRow"><div><div class="lbl" data-ref="repTestLabel">测试报告</div><div class="hint" data-ref="hRepTest">使用已保存的文字报告设置发送测试</div></div><div class="ctl"><a class="btn" data-ref="repImageBtn" href="/api/notify/report_image" target="_blank" rel="noopener" style="display:none">预览日报图</a><button class="btn" type="button" data-ref="repTestBtn">测试推送</button></div></div>
 <div class="set-row"><div><div class="lbl">保存设置</div><div class="hint" data-ref="hMsg"></div></div><div class="ctl"><button class="btn primary" type="button" data-ref="save">保存</button></div></div>`;
 const x = collect(card);
 function fieldHtml(chIdx, field, value) {
@@ -5297,7 +5299,12 @@ const imageMode = f.report_mode === 'image';
 const key = imageMode ? 'report_image_modules' : 'report_modules';
 const cats = {};
 REPORT_MOD_ORDER.forEach(k => { const [label, cat] = REPORT_MODS[k]; (cats[cat] = cats[cat] || []).push([k, label]); });
-const groups = imageMode ? (NB?.report_image_options || []).map(g => [g.title, g.options]) : Object.entries(cats);
+const reportGroups = new Map((NB?.report_image_options || []).map(g => [g.id, g]));
+const groups = imageMode
+? ['hero', ...orderOf('overview')]
+.filter(id => !(UI.hidden.overview || []).includes(id) && (id !== 'monthly' || +S.cfg?.monthly_summary_enabled))
+.map(id => reportGroups.get(id)).filter(Boolean).map(g => [g.title, g.options])
+: Object.entries(cats);
 const chosen = f[key] ?? NB?.report_image_default ?? [];
 x.repMods.innerHTML = groups.map(([cat, items]) =>
 `<div style="margin-bottom:8px">${imageMode && items.length === 1 && items[0][1] === cat ? '' : `<div class="set-sub" style="margin:0 0 4px">${esc(cat)}</div>`}<div class="chips">` +
@@ -5340,21 +5347,54 @@ f.report_detail = v;
 syncReportFormat();
 }, 'sm');
 x.repDetailSeg.appendChild(repDetailSeg);
+const qiniuFields = [
+['region', '存储区域', '例如：华南-广东。上传地址会根据选中的区域自动匹配。'],
+['bucket', '空间名称', '例如：my-report-bucket。填写七牛对象存储中的空间名称。'],
+['base_url', '下载域名', '例如：http://img.example.com 或 https://img.example.com。只填协议和域名，图片须能公开读取。'],
+['prefix', '图片目录', '例如：reports/。留空则存到空间根目录。'],
+['access_key', 'AccessKey', '例如：YOUR_ACCESS_KEY。从七牛控制台的密钥管理获取。'],
+['secret_key', 'SecretKey', '例如：YOUR_SECRET_KEY。填写与 AccessKey 对应的密钥。'],
+];
+function renderQiniu() {
+x.repQiniu.innerHTML = '<div class="set-sub">七牛云图床</div>' + qiniuFields.map(([key, label, example]) => {
+const secret = key.endsWith('_key');
+const field = key === 'region'
+? '<select class="textfield" data-qiniu="region" aria-label="存储区域"><option value="">请选择存储区域</option>' +
+(NB?.report_qiniu_regions || []).map(region => `<option>${esc(region)}</option>`).join('') + '</select>'
+: `<input class="textfield" type="${secret ? 'password' : 'text'}" data-qiniu="${key}" aria-label="${label}" maxlength="512" autocomplete="off" spellcheck="false"${secret && f.report_qiniu[key + '_set'] ? ' placeholder="已配置，留空保留"' : ''}>`;
+return `<div class="set-row"><div class="lbl">${label} <button type="button" class="btn qiniu-help" data-qiniu-help="${key}" title="${esc(example)}" aria-label="${label}填写示例" aria-expanded="false">?</button></div><div class="ctl">${field}</div></div>`;
+}).join('');
+for (const field of x.repQiniu.querySelectorAll('[data-qiniu]')) {
+const key = field.dataset.qiniu;
+field.value = f.report_qiniu[key] || '';
+field.addEventListener('input', () => { f.report_qiniu[key] = field.value; });
+}
+for (const button of x.repQiniu.querySelectorAll('[data-qiniu-help]')) {
+const [, label, example] = qiniuFields.find(([key]) => key === button.dataset.qiniuHelp);
+button.addEventListener('click', () => openPop(button, label, example));
+}
+}
+let lastReportMode;
 function syncReportFormat() {
 const isImage = f.report_mode === 'image';
 repDetailSeg.set(isImage ? 'image' : f.report_detail);
 renderRepMods();
 x.repImageBtn.style.display = isImage ? '' : 'none';
-x.repTestBtn.style.display = isImage ? 'none' : '';
+x.repQiniu.hidden = !isImage;
 setText(x.hRepMods, isImage ? '按首页区块勾选卡片，出图顺序与此处一致' : '勾选要在报告里推送的模块');
-setText(x.repTestLabel, isImage ? '图片预览' : '测试报告');
-setText(x.hRepTest, isImage ? '保存后可预览所选卡片，定时报告目前仍以文字发送' : '使用已保存的文字报告设置发送测试');
+setText(x.repTestLabel, isImage ? '图片测试' : '测试报告');
+if (lastReportMode !== f.report_mode) {
+lastReportMode = f.report_mode;
+setText(x.hRepTest, isImage ? '测试检查七牛上传、公开读回和钉钉发送。定时报告仍使用文字。' : '使用已保存的文字报告设置发送测试');
+}
 }
 x.repTestBtn.addEventListener('click', async () => {
 x.repTestBtn.disabled = true; setText(x.hRepTest, '正在发送测试报告…');
 try {
-const j = await API.post('/api/notify/report_test', {});
-if (j && j.ok) { setText(x.hRepTest, '测试报告已发送，请到推送渠道查看'); toast('测试报告已发送', { icon: 'check', ms: 4000 }); }
+const data = { report_mode: f.report_mode };
+if (f.report_mode === 'image') data.report_qiniu = Object.assign({}, f.report_qiniu);
+const j = await API.post('/api/notify/report_test', data);
+if (j && j.ok) { setText(x.hRepTest, j.message || '测试报告已发送，请到推送渠道查看'); toast('测试报告已发送', { icon: 'check', ms: 4000 }); }
 else { setText(x.hRepTest, '发送失败：' + ((j && j.error) || '未知错误')); toast('测试报告发送失败', { icon: 'alert', ms: 5000 }); }
 } catch (e) { setText(x.hRepTest, '发送失败：' + String(e.message).slice(0, 60)); toast('测试报告发送失败', { icon: 'alert', ms: 5000 }); }
 x.repTestBtn.disabled = false;
@@ -5411,6 +5451,7 @@ report_enabled: f.report_enabled,
 report_detail: f.report_detail || 'detail',
 report_mode: f.report_mode,
 report_image_modules: f.report_image_modules,
+report_qiniu: Object.assign({}, f.report_qiniu),
 report_schedule: Object.assign({}, f.report_schedule),
 report_modules: f.report_modules.slice(),
 };
@@ -5418,6 +5459,8 @@ try {
 const j = await API.post('/api/notify/save', body);
 if (!j || !j.ok) throw new Error((j && j.error) || '未知错误');
 NB = Object.assign(await loadNotify(true), { last: (NB || {}).last || {} });
+f.report_qiniu = Object.assign({}, NB.report_qiniu || {});
+renderQiniu();
 f.channels.forEach(c => {
 const secrets = { mail: ['password'], sct: ['key'], wechat: ['url'], dingtalk: ['url', 'secret'],
 feishu: ['url'], bark: ['url'], pushplus: ['token'], webhook: ['url'], wecom_app: ['corp_secret'] }[c.type] || [];
@@ -5447,6 +5490,8 @@ f.report_enabled = n.report_enabled || 0;
 f.report_detail = (n.report_detail === 'brief' || n.report_detail === 'detail') ? n.report_detail : 'detail';
 f.report_mode = n.report_mode === 'image' ? 'image' : 'text';
 f.report_image_modules = Array.isArray(n.report_image_modules) ? n.report_image_modules.slice() : null;
+f.report_qiniu = Object.assign({}, n.report_qiniu || {});
+renderQiniu();
 f.report_schedule = Object.assign({ type: 'daily', time: '08:00', weekday: 0, day: 1, interval_minutes: 60 }, n.report_schedule || {});
 f.report_modules = Array.isArray(n.report_modules) && n.report_modules.length ? n.report_modules.slice() : ['system', 'cpu', 'memory', 'disk', 'network'];
 renderAll();
@@ -6304,11 +6349,40 @@ setStatus();
 route();
 setHash(false);
 requestAnimationFrame(() => placeThumb($('#pageSeg')));
-Poll.run('overview');
-Promise.all([loadUI(), loadConfig().catch(() => null)]).then(() => { syncSettings(); Poll.run('monthly'); Poll.run('weather'); });
+const overviewReady = Poll.run('overview');
+const configReady = Promise.all([loadUI(), loadConfig().catch(() => null)]);
+if (window.fnmonitorReport) {
+window.fnmonitorReportReady = async groups => {
+await Promise.all([overviewReady, configReady]);
+if (!S.o) throw new Error('总览数据加载失败');
+const tasks = [];
+if (groups.includes('hero')) tasks.push(Poll.run('weather'));
+if (groups.includes('metrics')) tasks.push(seedSparks());
+if (groups.includes('storage')) tasks.push(Poll.run('diskhealth'));
+if (groups.includes('procs')) tasks.push(Poll.run('procs'));
+if (groups.includes('monthly')) tasks.push(Poll.run('monthly'));
+if (groups.includes('energy')) tasks.push(Poll.run('pstats'));
+if (groups.includes('network')) tasks.push(Poll.run('traffic'));
+if (groups.includes('energy') || groups.includes('network')) tasks.push(Daily.get());
+await Promise.all(tasks);
+const charts = [];
+for (const id of groups) {
+const m = MODS[id];
+if (!m || m.el.hidden || m.el.classList.contains('off')) continue;
+if (id === 'energy' || id === 'network') m.barsAt = Date.now();
+runUpdate(m);
+if (id === 'energy' || id === 'network') charts.push(m.loadBars());
+if (id === 'trends') charts.push(m.load());
+}
+await Promise.all(charts);
+if (groups.includes('hero')) { Hero.update(S.o); Hero.clock(); }
+};
+} else {
+configReady.then(() => { syncSettings(); Poll.run('monthly'); Poll.run('weather'); });
 Poll.run('pstats'); Poll.run('traffic');
 seedSparks().catch(() => {});
 setInterval(() => Poll.tick(), 1000);
+}
 const seen = { thermal: false, energy: false, containers: false };
 function noteSeen(o) {
 if (!o) return;

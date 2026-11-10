@@ -3608,6 +3608,7 @@ NOTIFY_DEFAULT = {
     "report_detail": "detail",  # brief=简略 / detail=详细
     "report_mode": "text",
     "report_image_modules": None,
+    "report_qiniu": {},
     "report_schedule": {"type": "daily", "time": "08:00", "weekday": 0, "day": 1, "interval_minutes": 60},
     "report_modules": ["system", "cpu", "memory", "disk", "network"],
     "report_last_sent": 0,
@@ -3880,6 +3881,8 @@ def notify_load(data_dir):
     rd = str(user.get("report_detail") or "").strip().lower()
     cfg["report_detail"] = rd if rd in ("brief", "detail") else NOTIFY_DEFAULT["report_detail"]
     cfg["report_mode"] = "image" if user.get("report_mode") == "image" else "text"
+    from utils.report_qiniu import clean_config as clean_qiniu
+    cfg["report_qiniu"] = clean_qiniu(user.get("report_qiniu"))
     if isinstance(user.get("report_image_modules"), list):
         from utils.report_image import image_selection
         cfg["report_image_modules"] = image_selection(user["report_image_modules"])
@@ -3894,11 +3897,14 @@ def notify_load(data_dir):
 
 def notify_public(cfg):
     """对外配置：保密字段（密码 / URL / Token）换成「是否已填」，绝不回传明文。"""
-    out = {k: v for k, v in cfg.items() if k != "channels"}
+    out = {k: v for k, v in cfg.items() if k not in ("channels", "report_qiniu")}
+    from utils.report_qiniu import REGIONS, public_config as public_qiniu
+    out["report_qiniu"] = public_qiniu(cfg.get("report_qiniu") or {})
+    out["report_qiniu_regions"] = list(REGIONS)
     from utils.report_image import IMAGE_GROUPS, image_modules
     out["report_image_options"] = [
-        {"title": title, "options": [[key, label] for key, label, _ in cards]}
-        for _, title, cards in IMAGE_GROUPS
+        {"id": group, "title": title, "options": [[key, label] for key, label, _ in cards]}
+        for group, title, cards in IMAGE_GROUPS
     ]
     out["report_image_default"] = image_modules(cfg)
     pub_channels = []
@@ -3981,6 +3987,9 @@ def notify_save(data_dir, data, cur=None):
         cfg["report_detail"] = rd if rd in ("brief", "detail") else NOTIFY_DEFAULT["report_detail"]
     if data.get("report_mode") in ("text", "image"):
         cfg["report_mode"] = data["report_mode"]
+    if isinstance(data.get("report_qiniu"), dict):
+        from utils.report_qiniu import clean_config as clean_qiniu
+        cfg["report_qiniu"] = clean_qiniu(data["report_qiniu"], cfg.get("report_qiniu"))
     if isinstance(data.get("report_image_modules"), list):
         from utils.report_image import image_selection
         cfg["report_image_modules"] = image_selection(data["report_image_modules"])
@@ -4204,7 +4213,7 @@ def notify_wechat_send(ch, subject, body):
     return False, str(j.get("errmsg") or raw[:80] or "未知错误")
 
 
-def notify_dingtalk_send(ch, subject, body):
+def notify_dingtalk_send(ch, subject, body, *, image_report=False):
     """钉钉群机器人 Webhook：支持 text / markdown，支持加签。返回 (成功, 错误描述)。"""
     import hmac
     import hashlib
@@ -4225,11 +4234,11 @@ def notify_dingtalk_send(ch, subject, body):
         sep = "&" if "?" in url else "?"
         url = "%s%stimestamp=%s&sign=%s" % (url, sep, ts, sign)
     msg_type = (c.get("msg_type") or "markdown").strip().lower()
-    if msg_type not in ("text", "markdown"):
+    if image_report or msg_type not in ("text", "markdown"):
         msg_type = "markdown"
     # 自定义模板：覆盖默认的「### 标题 + 正文」组合
     tpl = (c.get("template") or "").strip()
-    if tpl:
+    if tpl and not image_report:
         text = _notify_render_body(tpl, subject, body)
     elif msg_type == "markdown":
         text = "### %s\n\n%s" % (subject, body.replace("\r\n", "\n"))
@@ -12254,7 +12263,7 @@ class MonitorApp:
 
     def api_notify_report_image(self):
         """Render the bundled overview from local data without an HTTP round trip."""
-        from utils.report_image import capture_png, image_modules
+        from utils.report_image import capture_png, image_groups, image_modules
 
         entry = self._static_entry("index.html")
         if entry is None:
@@ -12262,9 +12271,8 @@ class MonitorApp:
         modules = image_modules(notify_load(self.data_dir))
         if not modules:
             raise ValueError("请在图片模式勾选至少一个区块并保存")
-        selected = set(modules)
-        power = selected & {"power", "power_cost", "daily_power"}
-        network = selected & {"interfaces", "container_traffic", "daily_traffic"}
+        groups = image_groups(modules)
+        selected = {group["id"] for group in groups}
         overview = json.loads(self.api_overview())
         ts = overview.get("ts")
         if not ts:
@@ -12274,23 +12282,71 @@ class MonitorApp:
             "/api/ui": self.api_ui_get(),
             "/api/config": self.api_config(),
         }
-        if selected & {"disk", "pool", "raid"}:
+        if "storage" in selected:
             data["/api/disk_health"] = self.api_disk_health()
-        if power:
+        if "energy" in selected:
             data["/api/power_stats"] = self.api_power_stats()
-        if network:
+        if "network" in selected:
             data["/api/traffic"] = self.api_traffic()
-        if power or network:
+        if selected & {"energy", "network"}:
             data["/api/daily?days=30"] = self.api_daily(30)
-        if "weather" in selected:
+        if "hero" in selected:
             data["/api/weather"] = self.api_weather()
-        sampled_at = time.strftime("%Y-%m-%d %H:%M:%S %z", time.localtime(ts))
-        return capture_png(entry[0].decode("utf-8"), modules, data, sampled_at)
+        if "procs" in selected:
+            data["/api/processes"] = self.api_processes()
+        if "monthly" in selected:
+            data["/api/monthly_summary"] = self.api_monthly_summary()
+        history = set()
+        if "energy" in selected and not (data["/api/daily?days=30"] or {}).get("days"):
+            history.add(("power", "all"))
+        if "network" in selected and not (data["/api/daily?days=30"] or {}).get("days"):
+            history.add(("net", "all"))
+        if "metrics" in selected:
+            history.update((metric, "1h") for metric in ("cpu", "mem", "temp", "power", "net"))
+        if "trends" in selected:
+            ui = data["/api/ui"].get("ui") or {}
+            range_ = ui.get("range") if isinstance(ui, dict) else None
+            if range_ not in ("10m", "1h", "6h", "24h", "7d", "all"):
+                range_ = "24h"
+            history.update((metric, range_) for metric in
+                           ("cpu", "mem", "net", "diskio", "temp", "temp_mb", "power", "fan_avg"))
+        for metric, range_ in sorted(history):
+            data[f"/api/history?metric={metric}&range={range_}"] = self.api_history(metric, range_)
+        return capture_png(entry[0].decode("utf-8"), groups, data)
 
     def api_notify_report_test(self, data):
         """立刻发一条定时推送报告（测试用），用当前采集快照组装。"""
-        snap = self.collector.get_snapshot() if self.collector else {}
         cfg = notify_load(self.data_dir)
+        mode = data.get("report_mode", cfg.get("report_mode")) if isinstance(data, dict) else cfg.get("report_mode")
+        if mode == "image":
+            from utils.report_qiniu import clean_config as clean_qiniu, upload_png, validate
+            draft = data.get("report_qiniu") if isinstance(data, dict) else None
+            qiniu = clean_qiniu(draft, cfg.get("report_qiniu"))
+            try:
+                validate(qiniu)
+                channels = [ch for ch in cfg.get("channels", [])
+                            if ch.get("enabled") and ch.get("type") == "dingtalk"
+                            and (ch.get("config") or {}).get("url")]
+                if not channels:
+                    return {"ok": False, "error": "请先保存并启用钉钉群机器人渠道"}
+                sample = os.path.join(os.path.dirname(__file__), "utils", "report_test.png")
+                with open(sample, "rb") as file:
+                    url = upload_png(qiniu, file.read(), test=True)
+            except (RuntimeError, ValueError) as exc:
+                return {"ok": False, "error": str(exc)}
+            except OSError:
+                return {"ok": False, "error": "安装包缺少测试图片"}
+            subject = "[%s] 日报图测试" % (cfg.get("notify_title_prefix") or "飞牛监控")
+            body = "![日报测试图](%s)" % url
+            failures = 0
+            for channel in channels:
+                ok, _ = notify_dingtalk_send(channel, subject, body, image_report=True)
+                failures += not ok
+            if failures:
+                return {"ok": False, "error": "七牛上传和读回通过，%d/%d 个钉钉渠道发送失败"
+                        % (failures, len(channels))}
+            return {"ok": True, "message": "七牛上传和读回通过，测试图已发送到钉钉"}
+        snap = self.collector.get_snapshot() if self.collector else {}
         if not any(c.get("enabled") for c in (cfg.get("channels") or [])):
             return {"ok": False, "error": "没有已启用的推送渠道"}
         # 天气不在 collector 快照里，用 App 层缓存
