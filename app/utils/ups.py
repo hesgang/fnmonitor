@@ -6,7 +6,7 @@ Phase 2 在此基础上再加完整告警事件 + 面板。
 只依赖系统自带的 NUT 客户端 upsc（飞牛「UPS 电源管理」启用后即有）。
 不读 USB/HID，不写任何硬件，纯只读。
 """
-import os, re, time, json, threading, subprocess, shutil
+import math, os, re, time, json, threading, subprocess, shutil
 from urllib.parse import parse_qs, unquote
 
 # ---------------------------------------------------------------------------
@@ -1058,6 +1058,20 @@ def ups_latest():
     """最近一帧快照（浅拷贝）。"""
     with _UPS_LOCK:
         return dict(_UPS_LATEST)
+
+
+def ups_latest_output_w():
+    """返回最近的有效 UPS 输出瓦数，超期或缺失时返回 None。"""
+    snap = ups_latest()
+    if not snap.get("ok") or not snap.get("enabled") or snap.get("stale"):
+        return None
+    age = time.time() - snap["ts"]
+    if not 0 <= age <= 2 * snap["poll"]:
+        return None
+    watts = (snap.get("live") or {}).get("out_w")
+    if watts is not None and math.isfinite(watts) and watts >= 0:
+        return watts
+    return None
 
 
 def ups_public(cfg):

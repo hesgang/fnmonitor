@@ -105,7 +105,7 @@ UPDATE_REPO = "MisiteQ/fnmonitor"          # GitHub 仓库：在线检查更新 
 UPDATE_CHECK_INTERVAL = 6 * 3600           # 自动更新检查周期（6 小时）
 # 下载加速：直连 GitHub 下载域在国内常不可达，失败后自动依次尝试公共加速镜像
 GH_MIRRORS = ["", "https://gh-proxy.com/", "https://ghfast.top/", "https://ghproxy.net/", "https://gh.llkk.cc/"]
-DEFAULT_CONFIG = {"interval": 10, "retention_days": 7, "port": 0, "history_interval": 60, "weather_city": "", "data_dir": "", "update_autocheck": 1, "update_autodownload": 0, "update_autoupdate": 0, "traffic_exclude_bridge": 0, "power_tdp_w": 65, "power_rate_yuan": 0.6, "power_disk_typical_w": 8, "power_nic_fixed_w": 5, "power_base_w": 8, "disk_standby_protect": 1, "disk_scan_enabled": 1, "disk_scan_interval_h": 6, "disk_scan_notify": 0, "threshold_notify": 0, "open_mode": "url", "monthly_summary_enabled": 0, "auth_enabled": 0, "auth_password_hash": "", "auth_session_days": 7, "ec_fan_probe": 0}
+DEFAULT_CONFIG = {"interval": 10, "retention_days": 7, "port": 0, "history_interval": 60, "weather_city": "", "data_dir": "", "update_autocheck": 1, "update_autodownload": 0, "update_autoupdate": 0, "traffic_exclude_bridge": 0, "power_use_ups": 0, "power_tdp_w": 65, "power_rate_yuan": 0.6, "power_disk_typical_w": 8, "power_nic_fixed_w": 5, "power_base_w": 8, "disk_standby_protect": 1, "disk_scan_enabled": 1, "disk_scan_interval_h": 6, "disk_scan_notify": 0, "threshold_notify": 0, "open_mode": "url", "monthly_summary_enabled": 0, "auth_enabled": 0, "auth_password_hash": "", "auth_session_days": 7, "ec_fan_probe": 0}
 # 提醒阈值（v2.18.0 新增）：前端「设置 → 提醒阈值」写入 ui.json 的 thresholds 字段，
 # 界面着色 / 趋势阈值线 / 首页结论与健康报告共用同一口径。键 → (默认值, 最小, 最大)
 THRESHOLD_SPEC = {
@@ -5894,7 +5894,7 @@ def notify_report_collect(snapshot, data_dir, cfg, extra=None, vms_monitor=None)
         payload["network"] = {"count": len(net_list), "interfaces": net_list}
     if "power" in mods:
         pwr = snap.get("power") or {}
-        src_map = {"rapl": "RAPL 实测", "idrac": "iDRAC", "estimated": "模型估算", "unknown": "不可用"}
+        src_map = {"rapl": "RAPL 实测", "idrac": "iDRAC", "ups": "UPS 输出", "estimated": "模型估算", "unknown": "不可用"}
         # kWh / 电费不在采集快照里（快照只有实时瓦数），由调用方经 extra["power_stats"] 注入
         ps = extra.get("power_stats") or {}
         payload["power"] = {
@@ -10549,8 +10549,11 @@ class Collector(threading.Thread):
         # 注意口径：RAPL package 只是 CPU 封装功耗（Jasper Lake N5095 等 SoC 空闲
         # 仅 2-3W，且通常没有 DRAM 域），不等于整机功耗。整机 total = package
         # + dram + 主板等固定底座(power_base_w) + 活动硬盘数 * 单盘功耗，休眠盘不计。
+        use_ups_power = self.config.get("power_use_ups") and _UPS_AVAILABLE
+        # 每次实时采集复用 UPS 的最近有效快照。UPS 不可用时才走原有功耗来源。
+        ups_w = _ups_mod.ups_latest_output_w() if use_ups_power else None
         try:
-            if not _skip("power") and now - self._last_power_ts >= 10:
+            if ups_w is None and (use_ups_power or not _skip("power")) and now - self._last_power_ts >= 10:
                 # 活动硬盘数：硬盘详情每 60 秒标注 state；未知(unknown)按活动计，
                 # 与旧行为一致，明确 standby 的盘才剔除。固态与机械单盘功耗差距大，
                 # 按介质分别累计（全闪机器不再按机械盘 8W/块 高估）。
@@ -10604,7 +10607,9 @@ class Collector(threading.Thread):
                 self._last_power_ts = now
         except Exception:
             self._last_power = {"ok": False, "source": "unknown"}
-        snapshot["power"] = self._last_power
+        snapshot["power"] = self._last_power if ups_w is None else {
+            "ok": True, "source": "ups", "total": ups_w,
+        }
         # ---- GPU 实时（每 10 秒） ----
         try:
             if now - self._last_gpu_ts >= 10:
@@ -10666,9 +10671,9 @@ class Collector(threading.Thread):
                 rows.append((now, "temp", _r2(temps["cpu"])))
             if temps.get("system"):
                 rows.append((now, "temp_mb", _r2(temps["system"])))
-            # ---- 功耗（历史维度）：与接口实时快照同源（RAPL 实测 / 模型估算） ----
-            pw = self._last_power or {}
-            if pw.get("ok") and pw.get("total"):
+            # ---- 功耗历史：与实时接口使用同一个读数 ----
+            pw = snapshot["power"]
+            if pw.get("ok") and (pw.get("total") or pw.get("source") == "ups"):
                 rows.append((now, "power", _r2(pw.get("total"))))
                 if pw.get("source") == "estimated":
                     # 估算值额外写一份 power_est，导出 CSV 时可区分实测/估算口径
@@ -13223,7 +13228,7 @@ class MonitorApp:
         onoff = lambda x: 1 if str(x).lower() in ("1", "true", "on") else 0
         for k in ("update_autocheck", "update_autodownload", "update_autoupdate", "traffic_exclude_bridge",
                   "disk_standby_protect", "monthly_summary_enabled", "auth_enabled", "ec_fan_probe",
-                  "disk_scan_enabled", "disk_scan_notify", "threshold_notify"):
+                  "disk_scan_enabled", "disk_scan_notify", "threshold_notify", "power_use_ups"):
             if k in data:
                 updates[k] = onoff(data[k])
         # 硬盘巡检间隔：0 = 关闭；其余就近取档位（6/12/24/72/168 小时）
@@ -14397,7 +14402,7 @@ def load_config(data_dir):
     # 开关类（在线更新 / 流量 / 休眠保护 / 上月汇总 / 鉴权 / EC 风扇探测 / 硬盘巡检）必须随配置恢复
     for k in ("update_autocheck", "update_autodownload", "update_autoupdate", "traffic_exclude_bridge",
               "disk_standby_protect", "monthly_summary_enabled", "auth_enabled", "ec_fan_probe",
-              "disk_scan_enabled", "disk_scan_notify", "threshold_notify"):
+              "disk_scan_enabled", "disk_scan_notify", "threshold_notify", "power_use_ups"):
         if k in user:
             cfg[k] = onoff(user[k])
     if "disk_scan_interval_h" in user:

@@ -45,6 +45,7 @@ const barOpts = (days, series, fmt, h) => ({
 });
 function powerParts(p) {
   // iDRAC 给的是整机电源输出，拆不出 CPU/内存/硬盘，直接一条整机实测
+  if (p.source === 'ups') return [['UPS 输出', +p.total, 'var(--d-p)']];
   if (p.source === 'idrac') return [['整机实测', +p.total || 0, 'var(--d-p)']];
   const parts = [];
   if (ok(p.package)) parts.push(['CPU 封装', +p.package, 'var(--d-p)']);
@@ -56,7 +57,7 @@ function powerParts(p) {
   return parts;
 }
 const ppI = c => c === 'hatch' ? '<i class="hatch"></i>' : `<i style="background:${c}"></i>`;
-const SRC_TXT = { idrac: 'iDRAC 实测', rapl: '硬件 RAPL', estimated: '模型估算' };
+const SRC_TXT = { idrac: 'iDRAC 实测', rapl: '硬件 RAPL', ups: 'UPS 输出', estimated: '模型估算' };
 /** 本月预计：已用电量 + 剩余时长 × 平均功率 */
 const monthProj = (mk, o) => { const a = avgW(o); if (!ok(mk) || !a) return null; const d = new Date(), end = new Date(d.getFullYear(), d.getMonth() + 1, 1); return { kwh: mk + a.w * (end - d) / 3.6e9, w: a.w, basis: a.basis }; };
 /** 全年估算：平均功率 × 8760 小时（只是估算，口径写在副标题里） */
@@ -115,6 +116,7 @@ defineModule({
     setText(x.src, has ? (SRC_TXT[p.source] || '来源未知') : '不可用');
     setText(x.wSub, !has ? '无法读取 RAPL，也无法估算整机功耗'
       : p.source === 'idrac' ? `iDRAC 实测整机输出${ok(p.capacity) ? ` · 电源容量 ${F.int(p.capacity)} W` : ''}${ok(p.min) && ok(p.max) ? ` · 近 1 分钟 ${F.int(p.min)}–${F.int(p.max)} W` : ''}`
+        : p.source === 'ups' ? 'UPS 输出功率用于用电量和电费计算'
         : p.source === 'rapl' ? '整机 = CPU 封装（RAPL 实测）+ 内存 + 主板底座 + 活动硬盘' : '无 RAPL：按 TDP × CPU 占用 + 硬盘 + 网卡 + 主板底座估算');
     const parts = has ? powerParts(p) : [], sig = parts.map(q => q[0]).join();
     if (m.psig !== sig) { m.psig = sig; x.stack.innerHTML = parts.map(q => ppI(q[2])).join(''); }
@@ -166,13 +168,21 @@ defineModule({
   },
   async update(o, m) {
     const x = m.x;
+    const power = o && o.power;
+    const sharedPower = power && power.ok && power.source === 'ups';
+    if (sharedPower) {
+      dnum(x.outW, power.total, F.d1);
+      setText(x.outU, 'W');
+    }
     if (!m.lastUpsTs || Date.now() - m.lastUpsTs > 5000) {
       m.lastUpsTs = Date.now();
       try { m.upsSnap = await API.get('/api/ups'); } catch (e) { m.upsSnap = null; }
+      if (o !== S.o) return;
     }
     const d = m.upsSnap;
     if (!d || d.state === 'off') {
-      dot(x.outW).set(null); dot(x.outV).set(null); dot(x.chg).set(null); dot(x.load).set(null); dot(x.rt).set(null);
+      if (!sharedPower) dot(x.outW).set(null);
+      dot(x.outV).set(null); dot(x.chg).set(null); dot(x.load).set(null); dot(x.rt).set(null);
       setText(x.stPill, d && d.upsc ? 'UPS 未启用' : '未检测到 UPS');
       setText(x.sub, d && d.upsc ? '开关未开启' : '需启用飞牛「UPS 电源管理」安装 nut-client');
       setText(x.outLbl, ''); setText(x.chgLbl, ''); setText(x.loadLbl, ''); setText(x.rtLbl, '');
@@ -180,7 +190,8 @@ defineModule({
     }
     if (!d.ok) {
       // 已开启但采集失败：不能伪装成“未启用”，否则用户会以为模块没开
-      dot(x.outW).set(null); dot(x.outV).set(null); dot(x.chg).set(null); dot(x.load).set(null); dot(x.rt).set(null);
+      if (!sharedPower) dot(x.outW).set(null);
+      dot(x.outV).set(null); dot(x.chg).set(null); dot(x.load).set(null); dot(x.rt).set(null);
       setHTML(x.stPill, '<span class="pill crit">UPS 连接异常</span>');
       setText(x.sub, (d.error || '读取 UPS 失败') + (d.hint ? ' · ' + d.hint : ''));
       setText(x.outLbl, ''); setText(x.chgLbl, ''); setText(x.loadLbl, ''); setText(x.rtLbl, '');
@@ -190,8 +201,10 @@ defineModule({
     const labels = lv.labels || [];
     const cls = lv.st & 4 ? 'crit' : (lv.st & 1024 || lv.st & 64 ? 'warn' : 'ok');
     setHTML(x.stPill, `<span class="pill ${cls}">${labels.map(esc).join(' · ') || '市电正常'}</span>`);
-    dnum(x.outW, lv.out_w != null ? lv.out_w : lv.out_va, F.int);
-    setText(x.outU, lv.out_w != null ? 'W' : (lv.out_va != null ? 'VA' : 'W'));
+    if (!sharedPower) {
+      dnum(x.outW, lv.out_w != null ? lv.out_w : lv.out_va, lv.out_w != null ? F.d1 : F.int);
+      setText(x.outU, lv.out_w == null && lv.out_va != null ? 'VA' : 'W');
+    }
     setText(x.sub, `${esc((dv.brand || dv.mfr || '') + (dv.model ? ' ' + dv.model : (dv.brand || dv.mfr ? '' : dv.name || 'UPS')))} · 输入 ${lv.in_v != null ? F.d1(lv.in_v) + ' V' : '--'}`);
     dnum(x.outV, lv.out_v, F.d1); setText(x.outLbl, lv.out_a != null ? `电流 ${F.d1(lv.out_a)} A` : '');
     dnum(x.chg, lv.chg, F.int); setText(x.chgLbl, lv.bat_v != null ? `电池 ${F.d1(lv.bat_v)} V` : '');

@@ -2661,10 +2661,10 @@ m.sp.temp.set([{ values: vals(tv != null ? (ct != null ? S.live.temp : S.live.te
 const pw = o.power || {}, has3 = pwrOk(o), w = has3 ? +pw.total : null, ep = S.pstats && S.pstats.estimation_params;
 const capW = pw.capacity ? +pw.capacity : (ep ? ep.tdp_w + ep.base_w + ep.disk_typical_w * Math.max(1, dd.length) + ep.nic_fixed_w * Math.max(1, ni.length) : Math.max(60, (w || 0) * 1.5));
 dnum(x.pwrV, w, F.d1); m.g.pwr.set(w != null ? w / capW : 0, ''); m.g.pwr.tone(w != null ? rampAt(w / capW * 100, 'gen') : ''); inkTo(x.pwrV, w != null ? rampInk(w / capW * 100, 'gen') : '');
-st('pwr', '', !has3 ? '不可用' : pw.source === 'idrac' ? 'iDRAC 实测' : pw.source === 'rapl' ? '实测 + 估算' : '估算');
+st('pwr', '', !has3 ? '不可用' : pw.source === 'idrac' ? 'iDRAC 实测' : pw.source === 'rapl' ? '实测 + 估算' : pw.source === 'ups' ? 'UPS 输出' : '估算');
 const en = S.pstats && S.pstats.energy, co = S.pstats && S.pstats.cost;
 const pwrSrc = pw.source === 'idrac' ? `iDRAC 整机读数${pw.capacity ? ` · 电源容量 ${F.int(pw.capacity)} W` : ''}`
-: pw.source === 'rapl' ? '硬件 RAPL 读数' : '按部件模型估算';
+: pw.source === 'rapl' ? '硬件 RAPL 读数' : pw.source === 'ups' ? 'UPS 输出功率' : '按部件模型估算';
 setText(x.pwrSub, !has3 ? '无法读取或估算功耗' : en ? `今日 ${F.kwh(en.today_kwh)} kWh · ${F.yuan(co && co.today_yuan)}` : pwrSrc);
 m.sp.pwr.set([{ values: vals(S.live.power) }], { min: 0 });
 },
@@ -3081,6 +3081,7 @@ title: i => days[i] ? (days[i].getMonth() + 1) + '/' + days[i].getDate() + (i ==
 xLabel: i => { const n = days.length, step = n > 14 ? 7 : n > 7 ? 3 : 1; return i === n - 1 ? '今天' : ((n - 1 - i) % step === 0 && days[i] ? (days[i].getMonth() + 1) + '/' + days[i].getDate() : null); },
 });
 function powerParts(p) {
+if (p.source === 'ups') return [['UPS 输出', +p.total, 'var(--d-p)']];
 if (p.source === 'idrac') return [['整机实测', +p.total || 0, 'var(--d-p)']];
 const parts = [];
 if (ok(p.package)) parts.push(['CPU 封装', +p.package, 'var(--d-p)']);
@@ -3092,7 +3093,7 @@ if (rest > 0.05) parts.push([p.source === 'estimated' ? 'CPU 与网卡等（估�
 return parts;
 }
 const ppI = c => c === 'hatch' ? '<i class="hatch"></i>' : `<i style="background:${c}"></i>`;
-const SRC_TXT = { idrac: 'iDRAC 实测', rapl: '硬件 RAPL', estimated: '模型估算' };
+const SRC_TXT = { idrac: 'iDRAC 实测', rapl: '硬件 RAPL', ups: 'UPS 输出', estimated: '模型估算' };
 const monthProj = (mk, o) => { const a = avgW(o); if (!ok(mk) || !a) return null; const d = new Date(), end = new Date(d.getFullYear(), d.getMonth() + 1, 1); return { kwh: mk + a.w * (end - d) / 3.6e9, w: a.w, basis: a.basis }; };
 const yearProj = o => { const a = avgW(o); return a ? { kwh: a.w * 8.76, w: a.w, basis: a.basis } : null; };
 defineModule({
@@ -3147,6 +3148,7 @@ dnum(x.w, has ? +p.total : null, F.d1);
 setText(x.src, has ? (SRC_TXT[p.source] || '来源未知') : '不可用');
 setText(x.wSub, !has ? '无法读取 RAPL，也无法估算整机功耗'
 : p.source === 'idrac' ? `iDRAC 实测整机输出${ok(p.capacity) ? ` · 电源容量 ${F.int(p.capacity)} W` : ''}${ok(p.min) && ok(p.max) ? ` · 近 1 分钟 ${F.int(p.min)}–${F.int(p.max)} W` : ''}`
+: p.source === 'ups' ? 'UPS 输出功率用于用电量和电费计算'
 : p.source === 'rapl' ? '整机 = CPU 封装（RAPL 实测）+ 内存 + 主板底座 + 活动硬盘' : '无 RAPL：按 TDP × CPU 占用 + 硬盘 + 网卡 + 主板底座估算');
 const parts = has ? powerParts(p) : [], sig = parts.map(q => q[0]).join();
 if (m.psig !== sig) { m.psig = sig; x.stack.innerHTML = parts.map(q => ppI(q[2])).join(''); }
@@ -3194,20 +3196,29 @@ m.x = collect(body);
 },
 async update(o, m) {
 const x = m.x;
+const power = o && o.power;
+const sharedPower = power && power.ok && power.source === 'ups';
+if (sharedPower) {
+dnum(x.outW, power.total, F.d1);
+setText(x.outU, 'W');
+}
 if (!m.lastUpsTs || Date.now() - m.lastUpsTs > 5000) {
 m.lastUpsTs = Date.now();
 try { m.upsSnap = await API.get('/api/ups'); } catch (e) { m.upsSnap = null; }
+if (o !== S.o) return;
 }
 const d = m.upsSnap;
 if (!d || d.state === 'off') {
-dot(x.outW).set(null); dot(x.outV).set(null); dot(x.chg).set(null); dot(x.load).set(null); dot(x.rt).set(null);
+if (!sharedPower) dot(x.outW).set(null);
+dot(x.outV).set(null); dot(x.chg).set(null); dot(x.load).set(null); dot(x.rt).set(null);
 setText(x.stPill, d && d.upsc ? 'UPS 未启用' : '未检测到 UPS');
 setText(x.sub, d && d.upsc ? '开关未开启' : '需启用飞牛「UPS 电源管理」安装 nut-client');
 setText(x.outLbl, ''); setText(x.chgLbl, ''); setText(x.loadLbl, ''); setText(x.rtLbl, '');
 return;
 }
 if (!d.ok) {
-dot(x.outW).set(null); dot(x.outV).set(null); dot(x.chg).set(null); dot(x.load).set(null); dot(x.rt).set(null);
+if (!sharedPower) dot(x.outW).set(null);
+dot(x.outV).set(null); dot(x.chg).set(null); dot(x.load).set(null); dot(x.rt).set(null);
 setHTML(x.stPill, '<span class="pill crit">UPS 连接异常</span>');
 setText(x.sub, (d.error || '读取 UPS 失败') + (d.hint ? ' · ' + d.hint : ''));
 setText(x.outLbl, ''); setText(x.chgLbl, ''); setText(x.loadLbl, ''); setText(x.rtLbl, '');
@@ -3217,8 +3228,10 @@ const lv = d.live || {}, dv = d.device || {};
 const labels = lv.labels || [];
 const cls = lv.st & 4 ? 'crit' : (lv.st & 1024 || lv.st & 64 ? 'warn' : 'ok');
 setHTML(x.stPill, `<span class="pill ${cls}">${labels.map(esc).join(' · ') || '市电正常'}</span>`);
-dnum(x.outW, lv.out_w != null ? lv.out_w : lv.out_va, F.int);
-setText(x.outU, lv.out_w != null ? 'W' : (lv.out_va != null ? 'VA' : 'W'));
+if (!sharedPower) {
+dnum(x.outW, lv.out_w != null ? lv.out_w : lv.out_va, lv.out_w != null ? F.d1 : F.int);
+setText(x.outU, lv.out_w == null && lv.out_va != null ? 'VA' : 'W');
+}
 setText(x.sub, `${esc((dv.brand || dv.mfr || '') + (dv.model ? ' ' + dv.model : (dv.brand || dv.mfr ? '' : dv.name || 'UPS')))} · 输入 ${lv.in_v != null ? F.d1(lv.in_v) + ' V' : '--'}`);
 dnum(x.outV, lv.out_v, F.d1); setText(x.outLbl, lv.out_a != null ? `电流 ${F.d1(lv.out_a)} A` : '');
 dnum(x.chg, lv.chg, F.int); setText(x.chgLbl, lv.bat_v != null ? `电池 ${F.d1(lv.bat_v)} V` : '');
@@ -3709,7 +3722,7 @@ const x = collect(b);
 b.addEventListener('click', e => { const g = e.target.closest('[data-goset]'); if (g) { closeSheet(); focusGroup(g.dataset.goset); } });
 return o => {
 const p = o.power || {}, has = pwrOk(o), ps = S.pstats || {};
-dnum(x.v, has ? p.total : null, F.d1); setText(x.src, has ? (p.source === 'idrac' ? 'iDRAC 整机实测' : p.source === 'rapl' ? 'RAPL 实测 + 底座 / 硬盘估算' : '模型估算（无 RAPL）') : '不可用');
+dnum(x.v, has ? p.total : null, F.d1); setText(x.src, has ? (p.source === 'idrac' ? 'iDRAC 整机实测' : p.source === 'rapl' ? 'RAPL 实测 + 底座 / 硬盘估算' : p.source === 'ups' ? SRC_TXT.ups : '模型估算（无 RAPL）') : '不可用');
 const parts = has ? powerParts(p) : [];
 setHTML(x.st, parts.map(q => ppI(q[2])).join('')); parts.forEach((q, i) => { x.st.children[i].style.flexGrow = q[1].toFixed(2); });
 setHTML(x.leg, parts.map(([l, v, c]) => `<span>${ppI(c)}${esc(l)} <b>${F.d1(v)} W</b></span>`).join('') || '<span>无功耗数据</span>');
@@ -3718,6 +3731,7 @@ const psuRows = (p.psu || []).map(u => [`电源 ${esc(u.name)}`,
 `${ok(u.volts) ? esc(String(u.volts)) + ' V' : '—'} · ${esc(u.health || '')}${u.model ? ' · ' + esc(u.model) : ''}`]);
 setHTML(x.parts, has ? (p.source === 'idrac'
 ? kvHTML([['整机功耗', w(p.total)], ['电源容量', w(p.capacity)], ['最低（近 1 分钟）', w(p.min)], ['最高（近 1 分钟）', w(p.max)], ['平均（近 1 分钟）', w(p.avg)]].concat(psuRows))
+: p.source === 'ups' ? kvHTML([['UPS 输出功率', w(p.total)]])
 : kvHTML([['CPU 封装 Package', w(p.package)], ['　核心 Core', w(p.core)], ['　非核心 Uncore', w(p.uncore)], ['内存 DRAM', w(p.dram)], ['主板 / 其他底座', w(p.base)], [`活动硬盘${ok(p.disks_active) ? `（${p.disks_active} 块）` : ''}`, w(p.disks_w)]])) : '');
 const en = ps.energy || {}, co = ps.cost || {}, ep = ps.estimation_params;
 setText(x.rate, ok(co.rate_yuan_per_kwh) ? `电价 ${co.rate_yuan_per_kwh} 元/kWh` : '');
@@ -4868,8 +4882,9 @@ validate: v => !v ? '请输入城市名或坐标；如需自动定位，请打�
 set: (v, row) => saveCfg({ weather_city: v }, '天气位置', row).then(() => setTimeout(() => Poll.run('weather'), 800)) }),
 ] },
 { id: 'thresholds', title: '提醒阈值', icon: 'alert', desc: '平时不着色；超过警告阈值显示暖橙，超过严重阈值显示红色。总览结论、问题提示、趋势阈值线与负载色阶都使用这里的数值，健康报告也使用同一套阈值。', custom: renderThresholds },
-{ id: 'power', title: '功耗与电费', icon: 'bolt', desc: '用于电费计算，以及无 RAPL 时的整机功耗估算。', items: [
+{ id: 'power', title: '功耗与电费', icon: 'bolt', desc: '设置电价、功耗来源和整机估算参数。', items: [
 cfgItem('power_rate_yuan', '电价', 'number', { min: 0, max: 10, step: 0.01, unit: '元/kWh' }),
+cfgToggle('power_use_ups', '使用 UPS 输出功率', { hint: '开启后，使用有效的 UPS 输出功率记录功耗并计算用电量和电费。读数不可用时自动回到原有功耗来源。' }),
 cfgItem('power_tdp_w', 'CPU TDP', 'number', { min: 5, max: 500, unit: 'W', hint: 'RAPL 不可用时（AMD / ARM）的估算基线；ARM SoC 建议 15–35 W' }),
 cfgItem('power_disk_typical_w', '单盘典型功耗', 'number', { min: 0, max: 50, step: 0.5, unit: 'W', hint: '每块活动硬盘，3.5 寸 HDD 约 8 W，SSD 约 3 W' }),
 cfgItem('power_nic_fixed_w', '网卡固定功耗', 'number', { min: 0, max: 50, step: 0.5, unit: 'W', hint: '每块物理网卡' }),
