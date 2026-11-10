@@ -634,23 +634,29 @@ def ups_build(name, raw):
     live["nominal_va"] = _pick_num(raw, "ups.power.nominal", "output.power.nominal")
     live["source"] = raw.get("input.source") or ""
 
-    live["out_w"] = None
-    if live["out_v"] is not None and live["out_a"] is not None and live["out_v"] >= 50:
-        live["out_w"] = round(live["out_v"] * live["out_a"], 1)
-    elif live["rp"] is not None:
-        live["out_w"] = round(live["rp"], 1)
-
-    # 市电切换瞬间 UPS 会吐 0V：只剔除输出侧读数，输入/电量/负载仍是有效数据
-    ov = live.get("out_v")
-    live["valid"] = not (ov is not None and ov < 50)
-    if not live["valid"]:
-        for k in ("out_v", "out_a", "out_w", "out_hz"):
-            live[k] = None
-
     mfr = _clean_ident(_pick(raw, "device.mfr", "ups.mfr", "device.vendor",
                              "device.manufacturer"))
     model = _clean_ident(_pick(raw, "device.model", "ups.model", "device.modelname",
                                "device.product"), 80)
+    # W120 的直流输出约 19 V，不能按交流 UPS 的欠压阈值过滤。
+    usb_id = tuple(str(raw.get(key) or "").strip().casefold()
+                   for key in ("ups.vendorid", "ups.productid"))
+    w120_dc = (model.casefold() in ("w120", "wl w120")
+               and (mfr.casefold() in ("wl", "wallecube", "瓦力方程", "瓦力")
+                    or model.casefold() == "wl w120" or usb_id == ("04d8", "d005")))
+
+    # 切换时的 0 V 仍须过滤；输入、电量和负载不受影响。
+    ov, oa = live["out_v"], live["out_a"]
+    live["valid"] = ov is None or (ov > 0 if w120_dc else ov >= 50)
+    live["out_w"] = None
+    if not live["valid"]:
+        for k in ("out_v", "out_a", "out_hz"):
+            live[k] = None
+    elif live["rp"] is not None:
+        live["out_w"] = round(live["rp"], 1)
+    elif ov is not None and oa is not None and oa >= 0:
+        live["out_w"] = round(ov * oa, 1)
+
     serial = _clean_ident(_pick(raw, "device.serial", "ups.serial",
                                 "device.serialnumber"), 80)
     driver = raw.get("driver.name") or raw.get("driver.version") or ""

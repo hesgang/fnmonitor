@@ -4,6 +4,7 @@
 Megatec 系、瓦力方程的 APC HID 兼容机型），不依赖真实 UPS 或 NUT 服务。
 """
 import os
+import unittest
 
 from fnm_support import load_server
 
@@ -83,8 +84,48 @@ def test_build_apc_usbhid():
     }))
     live = snap["live"]
     assert snap["device"]["brand"] == "APC / 施耐德"
-    assert live["out_w"] == 240         # 无输出电压/电流时回落到 ups.realpower
+    assert live["out_w"] == 240         # 优先使用设备直报的有功功率
     assert live["temp"] == 31.4
+
+
+class TestW120Output(unittest.TestCase):
+    def test_build_w120_low_voltage_output(self):
+        live = ups.ups_build("ups", {
+            "ups.status": "ALARM OL",
+            "device.mfr": "WL",
+            "ups.model": "W120",
+            "output.voltage": "19.13",
+            "output.current": "1.365",
+            "battery.charge": "100",
+        })["live"]
+        assert live["valid"] is True
+        assert (live["out_v"], live["out_a"], live["out_w"]) == (19.13, 1.365, 26.1)
+        assert live["chg"] == 100
+
+
+    def test_build_w120_usb_id_prefers_reported_realpower(self):
+        live = ups.ups_build("ups", {
+            "ups.model": "W120", "ups.vendorid": "04D8", "ups.productid": "D005",
+            "output.voltage": "19.13", "output.current": "1.365",
+            "ups.realpower": "25.4",
+        })["live"]
+        assert (live["out_v"], live["out_w"]) == (19.13, 25.4)
+
+
+    def test_build_w120_zero_voltage_or_missing_current(self):
+        raw = {"device.mfr": "WL", "device.model": "W120"}
+        live = ups.ups_build("ups", dict(raw, **{"output.voltage": "0", "output.current": "0"}))["live"]
+        assert live["valid"] is False and live["out_w"] is None
+        live = ups.ups_build("ups", dict(raw, **{"output.voltage": "19.13"}))["live"]
+        assert live["out_v"] == 19.13 and live["out_a"] is None and live["out_w"] is None
+
+
+    def test_other_ups_low_voltage_still_filtered(self):
+        live = ups.ups_build("ups", {
+            "ups.model": "W120", "device.mfr": "Other",
+            "output.voltage": "19", "output.current": "1",
+        })["live"]
+        assert live["valid"] is False and live["out_w"] is None
 
 
 def test_build_megatec_qx():
