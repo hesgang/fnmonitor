@@ -399,7 +399,7 @@ function renderNotify(card) {
   // 状态：channels 是可变数组，每项 {id,type,name,enabled,config:{...}}
   let f = { channels: [], hw_enabled: 0, hw_time: '08:00', notify_title_prefix: '飞牛监控',
     notify_dnd_enabled: 0, notify_dnd_start: '23:00', notify_dnd_end: '08:00', notify_minimal: 0,
-    report_enabled: 0, report_detail: 'detail',
+    report_enabled: 0, report_detail: 'detail', report_mode: 'text', report_image_modules: null, report_qiniu: {},
     report_schedule: { type: 'daily', time: '08:00', weekday: 0, day: 1, interval_minutes: 60 },
     report_modules: ['system', 'cpu', 'memory', 'disk', 'network'] };
   // 报告模块定义：key → [中文标签, 分类]
@@ -443,14 +443,15 @@ function renderNotify(card) {
       <input class="textfield mono" type="number" min="1" max="31" data-ref="repDay" aria-label="日期" style="width:60px;display:none" placeholder="日">
       <input class="textfield mono" type="number" min="1" max="10080" data-ref="repInterval" aria-label="间隔分钟" style="width:90px;display:none" placeholder="分钟">
     </div></div>
-    <div class="set-row wide" data-ref="repModRow"><div><div class="lbl">推送内容</div><div class="hint">勾选要在报告里推送的模块，并选择详细程度</div></div><div class="ctl" style="flex-direction:column;align-items:stretch;gap:10px">
+    <div class="set-row wide" data-ref="repModRow"><div><div class="lbl">推送内容</div><div class="hint" data-ref="hRepMods">勾选要在报告里推送的模块</div></div><div class="ctl" style="flex-direction:column;align-items:stretch;gap:10px">
       <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
-        <span style="font-size:11px;font-weight:600;color:var(--ink-3);letter-spacing:.02em">详细程度</span>
+        <span style="font-size:11px;font-weight:600;color:var(--ink-3);letter-spacing:.02em">报告格式</span>
         <div data-ref="repDetailSeg"></div>
       </div>
       <div class="rep-mods" data-ref="repMods"></div>
     </div></div>
-    <div class="set-row" data-ref="repTestRow"><div><div class="lbl">测试报告</div><div class="hint" data-ref="hRepTest">点「发送测试报告」立刻发一条当前数据的汇总报告</div></div><div class="ctl"><button class="btn" type="button" data-ref="repTestBtn">发送测试报告</button></div></div>
+    <div data-ref="repQiniu" hidden></div>
+    <div class="set-row" data-ref="repTestRow"><div><div class="lbl" data-ref="repTestLabel">测试报告</div><div class="hint" data-ref="hRepTest">使用已保存的文字报告设置发送测试</div></div><div class="ctl"><a class="btn" data-ref="repImageBtn" href="/api/notify/report_image" target="_blank" rel="noopener" style="display:none">预览日报图</a><button class="btn" type="button" data-ref="repTestBtn">测试推送</button></div></div>
     <div class="set-row"><div><div class="lbl">保存设置</div><div class="hint" data-ref="hMsg"></div></div><div class="ctl"><button class="btn primary" type="button" data-ref="save">保存</button></div></div>`;
   const x = collect(card);
 
@@ -660,12 +661,21 @@ function renderNotify(card) {
   setSw(x.swRep, 'report_enabled');
   // 渲染模块勾选框（按分类分组）
   function renderRepMods() {
+    const imageMode = f.report_mode === 'image';
+    const key = imageMode ? 'report_image_modules' : 'report_modules';
     const cats = {};
     REPORT_MOD_ORDER.forEach(k => { const [label, cat] = REPORT_MODS[k]; (cats[cat] = cats[cat] || []).push([k, label]); });
-    x.repMods.innerHTML = Object.entries(cats).map(([cat, items]) =>
-      `<div style="margin-bottom:8px"><div class="set-sub" style="margin:0 0 4px">${esc(cat)}</div><div class="chips">` +
+    const reportGroups = new Map((NB?.report_image_options || []).map(g => [g.id, g]));
+    const groups = imageMode
+      ? ['hero', ...orderOf('overview')]
+        .filter(id => !(UI.hidden.overview || []).includes(id) && (id !== 'monthly' || +S.cfg?.monthly_summary_enabled))
+        .map(id => reportGroups.get(id)).filter(Boolean).map(g => [g.title, g.options])
+      : Object.entries(cats);
+    const chosen = f[key] ?? NB?.report_image_default ?? [];
+    x.repMods.innerHTML = groups.map(([cat, items]) =>
+      `<div style="margin-bottom:8px">${imageMode && items.length === 1 && items[0][1] === cat ? '' : `<div class="set-sub" style="margin:0 0 4px">${esc(cat)}</div>`}<div class="chips">` +
       items.map(([k, label]) => {
-        const on = f.report_modules.includes(k);
+        const on = chosen.includes(k);
         return `<button type="button" class="chip-t" data-repmod="${k}" aria-pressed="${on}">${esc(label)}</button>`;
       }).join('') + '</div></div>'
     ).join('');
@@ -673,8 +683,9 @@ function renderNotify(card) {
       btn.addEventListener('click', () => {
         const k = btn.dataset.repmod;
         const on = btn.getAttribute('aria-pressed') === 'true';
-        if (on) { f.report_modules = f.report_modules.filter(m => m !== k); btn.setAttribute('aria-pressed', 'false'); }
-        else { if (!f.report_modules.includes(k)) f.report_modules.push(k); btn.setAttribute('aria-pressed', 'true'); }
+        const current = f[key] ?? chosen;
+        f[key] = on ? current.filter(m => m !== k) : [...current, k];
+        btn.setAttribute('aria-pressed', String(!on));
       });
     });
   }
@@ -691,15 +702,67 @@ function renderNotify(card) {
   x.repWeekday.addEventListener('change', () => { f.report_schedule.weekday = parseInt(x.repWeekday.value, 10); });
   x.repDay.addEventListener('input', () => { f.report_schedule.day = parseInt(x.repDay.value, 10) || 1; });
   x.repInterval.addEventListener('input', () => { f.report_schedule.interval_minutes = parseInt(x.repInterval.value, 10) || 60; });
-  // 详细程度分段控件
-  const repDetailSeg = makeSeg([['brief', '简略'], ['detail', '详细']], f.report_detail || 'detail', v => { f.report_detail = v; }, 'sm');
+  const repDetailSeg = makeSeg([['brief', '简略'], ['detail', '详细'], ['image', '图片']], f.report_detail, v => {
+    f.report_mode = v === 'image' ? 'image' : 'text';
+    if (v === 'image') {
+      if (f.report_image_modules === null && Array.isArray(NB?.report_image_default)) {
+        f.report_image_modules = NB.report_image_default.slice();
+      }
+    } else {
+      f.report_detail = v;
+    }
+    syncReportFormat();
+  }, 'sm');
   x.repDetailSeg.appendChild(repDetailSeg);
+  const qiniuFields = [
+    ['region', '存储区域', '例如：华南-广东。上传地址会根据选中的区域自动匹配。'],
+    ['bucket', '空间名称', '例如：my-report-bucket。填写七牛对象存储中的空间名称。'],
+    ['base_url', '下载域名', '例如：http://img.example.com 或 https://img.example.com。只填协议和域名，图片须能公开读取。'],
+    ['prefix', '图片目录', '例如：reports/。留空则存到空间根目录。'],
+    ['access_key', 'AccessKey', '例如：YOUR_ACCESS_KEY。从七牛控制台的密钥管理获取。'],
+    ['secret_key', 'SecretKey', '例如：YOUR_SECRET_KEY。填写与 AccessKey 对应的密钥。'],
+  ];
+  function renderQiniu() {
+    x.repQiniu.innerHTML = '<div class="set-sub">七牛云图床</div>' + qiniuFields.map(([key, label, example]) => {
+      const secret = key.endsWith('_key');
+      const field = key === 'region'
+        ? '<select class="textfield" data-qiniu="region" aria-label="存储区域"><option value="">请选择存储区域</option>' +
+          (NB?.report_qiniu_regions || []).map(region => `<option>${esc(region)}</option>`).join('') + '</select>'
+        : `<input class="textfield" type="${secret ? 'password' : 'text'}" data-qiniu="${key}" aria-label="${label}" maxlength="512" autocomplete="off" spellcheck="false"${secret && f.report_qiniu[key + '_set'] ? ' placeholder="已配置，留空保留"' : ''}>`;
+      return `<div class="set-row"><div class="lbl">${label} <button type="button" class="btn qiniu-help" data-qiniu-help="${key}" title="${esc(example)}" aria-label="${label}填写示例" aria-expanded="false">?</button></div><div class="ctl">${field}</div></div>`;
+    }).join('');
+    for (const field of x.repQiniu.querySelectorAll('[data-qiniu]')) {
+      const key = field.dataset.qiniu;
+      field.value = f.report_qiniu[key] || '';
+      field.addEventListener('input', () => { f.report_qiniu[key] = field.value; });
+    }
+    for (const button of x.repQiniu.querySelectorAll('[data-qiniu-help]')) {
+      const [, label, example] = qiniuFields.find(([key]) => key === button.dataset.qiniuHelp);
+      button.addEventListener('click', () => openPop(button, label, example));
+    }
+  }
+  let lastReportMode;
+  function syncReportFormat() {
+    const isImage = f.report_mode === 'image';
+    repDetailSeg.set(isImage ? 'image' : f.report_detail);
+    renderRepMods();
+    x.repImageBtn.style.display = isImage ? '' : 'none';
+    x.repQiniu.hidden = !isImage;
+    setText(x.hRepMods, isImage ? '按首页区块勾选卡片，出图顺序与此处一致' : '勾选要在报告里推送的模块');
+    setText(x.repTestLabel, isImage ? '图片测试' : '测试报告');
+    if (lastReportMode !== f.report_mode) {
+      lastReportMode = f.report_mode;
+      setText(x.hRepTest, isImage ? '测试检查七牛上传、公开读回和钉钉发送。定时报告仍使用文字。' : '使用已保存的文字报告设置发送测试');
+    }
+  }
   // 测试报告
   x.repTestBtn.addEventListener('click', async () => {
     x.repTestBtn.disabled = true; setText(x.hRepTest, '正在发送测试报告…');
     try {
-      const j = await API.post('/api/notify/report_test', {});
-      if (j && j.ok) { setText(x.hRepTest, '测试报告已发送，请到推送渠道查看'); toast('测试报告已发送', { icon: 'check', ms: 4000 }); }
+      const data = { report_mode: f.report_mode };
+      if (f.report_mode === 'image') data.report_qiniu = Object.assign({}, f.report_qiniu);
+      const j = await API.post('/api/notify/report_test', data);
+      if (j && j.ok) { setText(x.hRepTest, j.message || '测试报告已发送，请到推送渠道查看'); toast('测试报告已发送', { icon: 'check', ms: 4000 }); }
       else { setText(x.hRepTest, '发送失败：' + ((j && j.error) || '未知错误')); toast('测试报告发送失败', { icon: 'alert', ms: 5000 }); }
     } catch (e) { setText(x.hRepTest, '发送失败：' + String(e.message).slice(0, 60)); toast('测试报告发送失败', { icon: 'alert', ms: 5000 }); }
     x.repTestBtn.disabled = false;
@@ -734,9 +797,8 @@ function renderNotify(card) {
     if (document.activeElement !== x.repWeekday) x.repWeekday.value = String(sch.weekday || 0);
     if (document.activeElement !== x.repDay) x.repDay.value = String(sch.day || 1);
     if (document.activeElement !== x.repInterval) x.repInterval.value = String(sch.interval_minutes || 60);
-    repDetailSeg.set(f.report_detail || 'detail');
+    syncReportFormat();
     syncRepSchVis();
-    renderRepMods();
     const schLabel = ({ hourly: '每小时整点', daily: `每天 ${sch.time || '08:00'}`, weekly: `每周${'一二三四五六日'[sch.weekday || 0]} ${sch.time || '08:00'}`, monthly: `每月 ${sch.day || 1} 日 ${sch.time || '08:00'}`, interval: `每 ${sch.interval_minutes || 60} 分钟` })[sch.type || 'daily'] || '每天';
     setText(x.hRep, +f.report_enabled
       ? `已开启：${schLabel} 推送，${f.report_modules.length} 个模块`
@@ -760,6 +822,9 @@ function renderNotify(card) {
       notify_minimal: f.notify_minimal,
       report_enabled: f.report_enabled,
       report_detail: f.report_detail || 'detail',
+      report_mode: f.report_mode,
+      report_image_modules: f.report_image_modules,
+      report_qiniu: Object.assign({}, f.report_qiniu),
       report_schedule: Object.assign({}, f.report_schedule),
       report_modules: f.report_modules.slice(),
     };
@@ -767,6 +832,8 @@ function renderNotify(card) {
       const j = await API.post('/api/notify/save', body);
       if (!j || !j.ok) throw new Error((j && j.error) || '未知错误');
       NB = Object.assign(await loadNotify(true), { last: (NB || {}).last || {} });
+      f.report_qiniu = Object.assign({}, NB.report_qiniu || {});
+      renderQiniu();
       // 保存后清空本地的保密字段值（后端不回传，留空表示不修改）
       f.channels.forEach(c => {
         const secrets = { mail: ['password'], sct: ['key'], wechat: ['url'], dingtalk: ['url', 'secret'],
@@ -797,6 +864,10 @@ function renderNotify(card) {
     f.notify_minimal = n.notify_minimal || 0;
     f.report_enabled = n.report_enabled || 0;
     f.report_detail = (n.report_detail === 'brief' || n.report_detail === 'detail') ? n.report_detail : 'detail';
+    f.report_mode = n.report_mode === 'image' ? 'image' : 'text';
+    f.report_image_modules = Array.isArray(n.report_image_modules) ? n.report_image_modules.slice() : null;
+    f.report_qiniu = Object.assign({}, n.report_qiniu || {});
+    renderQiniu();
     f.report_schedule = Object.assign({ type: 'daily', time: '08:00', weekday: 0, day: 1, interval_minutes: 60 }, n.report_schedule || {});
     f.report_modules = Array.isArray(n.report_modules) && n.report_modules.length ? n.report_modules.slice() : ['system', 'cpu', 'memory', 'disk', 'network'];
     renderAll();

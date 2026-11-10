@@ -1360,3 +1360,4 @@ a { color: var(--ink-1); }
 .scanlog-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .scanlog-bar .faint { font-size: 12.5px; }
 @media (max-width: 520px) { .scanlog-bar .btn { flex: 1; } }
+.qiniu-help.btn { min-width: 24px; min-height: 24px; padding: 0 5px; margin-inline-start: 4px; }

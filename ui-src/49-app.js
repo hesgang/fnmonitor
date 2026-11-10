@@ -242,11 +242,40 @@ setStatus();
 route();
 setHash(false);
 requestAnimationFrame(() => placeThumb($('#pageSeg')));
-Poll.run('overview');
-Promise.all([loadUI(), loadConfig().catch(() => null)]).then(() => { syncSettings(); Poll.run('monthly'); Poll.run('weather'); });
-Poll.run('pstats'); Poll.run('traffic');
-seedSparks().catch(() => {});
-setInterval(() => Poll.tick(), 1000);
+const overviewReady = Poll.run('overview');
+const configReady = Promise.all([loadUI(), loadConfig().catch(() => null)]);
+if (window.fnmonitorReport) {
+  window.fnmonitorReportReady = async groups => {
+    await Promise.all([overviewReady, configReady]);
+    if (!S.o) throw new Error('总览数据加载失败');
+    const tasks = [];
+    if (groups.includes('hero')) tasks.push(Poll.run('weather'));
+    if (groups.includes('metrics')) tasks.push(seedSparks());
+    if (groups.includes('storage')) tasks.push(Poll.run('diskhealth'));
+    if (groups.includes('procs')) tasks.push(Poll.run('procs'));
+    if (groups.includes('monthly')) tasks.push(Poll.run('monthly'));
+    if (groups.includes('energy')) tasks.push(Poll.run('pstats'));
+    if (groups.includes('network')) tasks.push(Poll.run('traffic'));
+    if (groups.includes('energy') || groups.includes('network')) tasks.push(Daily.get());
+    await Promise.all(tasks);
+    const charts = [];
+    for (const id of groups) {
+      const m = MODS[id];
+      if (!m || m.el.hidden || m.el.classList.contains('off')) continue;
+      if (id === 'energy' || id === 'network') m.barsAt = Date.now();
+      runUpdate(m);
+      if (id === 'energy' || id === 'network') charts.push(m.loadBars());
+      if (id === 'trends') charts.push(m.load());
+    }
+    await Promise.all(charts);
+    if (groups.includes('hero')) { Hero.update(S.o); Hero.clock(); }
+  };
+} else {
+  configReady.then(() => { syncSettings(); Poll.run('monthly'); Poll.run('weather'); });
+  Poll.run('pstats'); Poll.run('traffic');
+  seedSparks().catch(() => {});
+  setInterval(() => Poll.tick(), 1000);
+}
 /* 启动 5 分钟后：始终没有数据源的版块自动隐藏一次（每台设备只做一次，可撤销 / 在设置中恢复） */
 const seen = { thermal: false, energy: false, containers: false };
 function noteSeen(o) {

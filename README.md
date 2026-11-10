@@ -1,14 +1,14 @@
-# 飞牛监控 fnMonitor
+# 飞牛监控 fnMonitor · 自用分支
 
 <p>
-  <img alt="Version" src="https://img.shields.io/badge/version-2.42.1-blue">
+  <img alt="Version" src="https://img.shields.io/badge/version-2.42.5-blue">
   <img alt="fnOS" src="https://img.shields.io/badge/fnOS-x86%20%7C%20arm64-success">
   <img alt="License" src="https://img.shields.io/badge/license-MIT-orange">
 </p>
 
-飞牛 fnOS 系统监控应用（FPK 原生应用）：实时监控 **CPU / 内存 / 磁盘 / 网络 / 温度 / 功耗 / GPU**，支持 Docker 容器管理、端口占用、硬盘 SMART、历史趋势与提醒阈值，深浅色 + 5 种主色。**流量统计模块**（整机 / 网卡 / 容器上下行流量、今日 / 本月累计、容器流量排行、CSV 导出）与**功耗统计模块**（实时瓦数 + kWh 耗电量 + 电费估算，无 RAPL 时自动回退 TDP 估算模型，CSV 导出）。**📢 通知推送系统**（企业微信 / 钉钉 / 飞书 / Bark / PushPlus / 企业微信应用 / Webhook 共 7 渠道，自定义模板 + 勿扰时段 + 极简推送）与**定时推送报告**（时 / 天 / 周 / 月 / 自定义间隔，17+ 模块 Markdown 汇总）。**🖥 fnOS 事件监控巡检**（主日志库 / 备份任务库 / 影视库 / 相册库 / 音乐库 / Docker Socket / SSH journal / WAN IP 变更共 8 类数据源，异步推送 + 独立开关）。**⚠️ 阈值警告推送**（8 类指标越限 / 升级 / 恢复全链路通知）。**📋 推送历史**（SQLite 分页存储，筛选 + JSON 详情）。纯 Python 标准库 + 单文件前端，**零第三方依赖、完全离线可用**，数据仅保存在本机。
+基于 [MisiteQ/fnmonitor](https://github.com/MisiteQ/fnmonitor) 的飞牛监控自用分支，保留总览、历史趋势、存储、容器、虚拟机和通知等上游功能，并加入 UPS 能耗统计与日报图片预览。
 
-- 当前版本：**v2.42.1**
+- 当前源码版本：**v2.42.5**，以 [personal/main](https://github.com/hesgang/fnmonitor/tree/personal/main) 为自用维护分支；[main](https://github.com/hesgang/fnmonitor/tree/main) 跟踪上游。
 - 作者：**Misite齊** · 贡献者：**[iqiuzixuan](https://github.com/iqiuzixuan)**（新界面、虚拟机、安全加固、回归测试）、**[ttkl9559-cell](https://github.com/ttkl9559-cell)**（SAS 硬盘 SMART、硬盘巡检与告警、iDRAC 带外监控）、**[mhduiy](https://github.com/mhduiy)**（硬盘温度刷新与 SMART 温度显示一致性修复）
 - 适用平台：fnOS **x86 + arm64**（最低系统版本 0.9.0）
 - 默认端口：**8777**（可改）
@@ -52,23 +52,25 @@
 - **设置**：服务与采集、提醒阈值、功耗与电费、外观（深浅色 / 主色 / 点阵数字 / 字号 / 动效）、登录口令、数据目录与导出、一键健康报告、在线更新；修改即保存，可撤销
 - **界面**：点阵数字与大圆角卡片设计、编辑布局（拖动排序 / 显示隐藏）、全局搜索（/）与键盘快捷键、手机与平板自适应、跟随系统减少动态效果
 
-## 📦 安装
+## UPS 输出与电费
 
-### 方式一：FnDepot 应用源（推荐）
+1. 在飞牛启用 UPS 电源管理，再到 **设置 → UPS 电源** 启用采集并确认有输出功率。
+2. 到 **设置 → 功耗与电费** 打开 **使用 UPS 输出功率**。开关默认关闭。
+3. 当 UPS 读数有效时，首页功耗、趋势和电费采用 UPS 输出。首页功耗、能耗和 UPS 卡片显示同一条功率采样。读数缺失或过期时回到原有功耗来源，已有历史继续参与汇总。
 
-在飞牛 fnOS 上安装 [FnDepot](https://github.com/EWEDLCM/FnDepot) 客户端后，添加作者的应用源即可搜索「飞牛监控」一键安装 / 升级：
+瓦力方程 W120 的约 19 V 直流输出按有效读数处理。优先使用设备直报的有功功率，缺少直报值时用输出电压乘以输出电流。相关兼容问题见 [上游 Issue #30](https://github.com/MisiteQ/fnmonitor/issues/30)。
 
-```
-https://github.com/MisiteQ/FnDepot
-```
+## 日报图片
 
-### 方式二：手动安装 FPK
+进入 **设置 → 通知设置 → 定时推送报告**，选择 **图片** 并勾选所需的总览卡片。保存后点 **预览日报图**，即可用当前采集快照渲染 PNG。
 
-1. 到 [Releases](https://github.com/MisiteQ/fnmonitor/releases) 按 NAS 架构下载：`fnmonitor-2.42.1-x86.fpk`（x86 机型）或 `fnmonitor-2.42.1-arm.fpk`（arm64 机型）
-2. 飞牛 OS → **应用中心** → 左下角 **手动安装** → 选择 fpk 文件
-3. 安装后从桌面打开 **飞牛监控**，或直接访问 `http://<NAS_IP>:8777`
+图片模式下的 **测试推送** 会将内置测试图上传至七牛，确认下载域名能读回后，通过已启用的钉钉群机器人发送。七牛的存储区域、空间名称、下载域名、图片目录和密钥在应用设置中填写。下载域名需能公开读取上传的图片。当前定时报告仍按文字发送。
 
-> 若「手动安装」入口被关闭，SSH 执行：`appcenter-cli manual-install enable`
+预览需要与运行平台和架构匹配的 Chromium Headless Shell 和 ChromeDriver。可将两个可执行文件及其运行库放入 `app/report-runtime/` 后打包，或将环境变量 `FNMONITOR_REPORT_RUNTIME` 指向已准备好的运行目录。Linux 下可执行文件需有执行权限，中文渲染依赖系统字体。
+
+## 安装
+
+从 `personal/main` 构建适合 NAS 架构的 FPK，然后在 **飞牛应用中心 → 手动安装** 选择安装包。安装后可从飞牛桌面打开，默认端口是 **8777**。作者原版可从 [上游 Releases](https://github.com/MisiteQ/fnmonitor/releases) 获取。
 
 ## 🛠 从源码打包
 
@@ -102,6 +104,7 @@ wizard/                 安装向导（端口 / 数据目录 / 采集间隔等�
 cmd/                    飞牛生命周期脚本（安装回调、启动、卸载清理、升级等）
 config/                 飞牛权限与资源声明（以 root 运行）
 app/server.py           后端：采集 + SQLite 历史 + HTTP API（零依赖）
+app/utils/report_*.py   日报渲染、图床上传及校验
 app/www/index.html      前端：单文件面板（构建产物，请勿直接修改）
 ui-src/                 前端源码（修改后执行 sh tools/build_ui.sh 生成 index.html）
 tools/                  前端构建脚本与图标源文件
