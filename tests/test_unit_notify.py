@@ -353,6 +353,67 @@ class NotifyTestEndpointTest(unittest.TestCase):
         self.assertTrue(m.called)
         self.assertIn("测试", m.call_args[0][1])
 
+    def test_image_report_push_uses_the_saved_preview_selection(self):
+        from utils import report_image, report_qiniu
+
+        app = srv.MonitorApp(self.dir, dict(srv.DEFAULT_CONFIG))
+        channel = {"enabled": 1, "type": "dingtalk",
+                   "config": {"url": "https://example.com/robot"}}
+        cfg = dict(srv.NOTIFY_DEFAULT, report_mode="image", report_enabled=1,
+                   report_image_modules=["metric_power"], channels=[channel],
+                   report_qiniu={"region": next(iter(report_qiniu.REGIONS)),
+                                 "bucket": "example-bucket", "base_url": "https://images.example.com",
+                                 "access_key": "test-access", "secret_key": "test-secret"})
+        png = b"rendered-report-png"
+        url = "https://images.example.com/report.png"
+        with (
+            mock.patch.object(srv, "notify_load", return_value=cfg),
+            mock.patch.object(srv, "notify_send_all", return_value=(True, {})) as send_text,
+            mock.patch.object(app, "api_overview", return_value=b'{"ts": 123}'),
+            mock.patch.object(app, "api_ui_get", return_value={}),
+            mock.patch.object(app, "api_config", return_value={}),
+            mock.patch.object(app, "api_history", return_value={}),
+            mock.patch.object(report_image, "capture_png", return_value=png) as render,
+            mock.patch.object(report_qiniu, "upload_png", return_value=url) as upload,
+            mock.patch.object(srv, "notify_dingtalk_send", return_value=(True, "")) as send,
+        ):
+            self.assertEqual(app.api_notify_report_image(), png)
+            self.assertTrue(app.api_notify_report_test({})["ok"])
+            self.assertEqual(render.call_count, 2)
+            preview_groups, test_groups = (call.args[1] for call in render.call_args_list)
+            self.assertEqual(preview_groups, test_groups)
+            self.assertEqual([group["keep"] for group in test_groups], [['[data-m="pwr"]']])
+            upload.assert_called_once_with(cfg["report_qiniu"], png, test=True)
+            self.assertIn(url, send.call_args.args[2])
+            self.assertTrue(send.call_args.kwargs["image_report"])
+
+            cfg["report_image_modules"] = []
+            self.assertFalse(app.api_notify_report_test({})["ok"])
+            self.assertEqual(upload.call_count, 1)
+            self.assertEqual(send.call_count, 1)
+
+            cfg["report_image_modules"] = ["metric_power"]
+            def run_scheduled():
+                return srv.notify_report_tick(self.dir, app.config, {}, send_image=app.collector.send_report_image)
+
+            self.assertTrue(run_scheduled()["ok"])
+            upload.assert_called_with(cfg["report_qiniu"], png, test=False)
+            self.assertEqual(render.call_args.args[1], preview_groups)
+            self.assertIn("定时报告", send.call_args.args[1])
+            send_text.assert_not_called()
+            self.assertIn("report_last_sent", cfg)
+
+            upload.side_effect = RuntimeError("图床读取失败")
+            self.assertFalse(run_scheduled()["ok"])
+            self.assertEqual(send.call_count, 2)
+            self.assertIn("report_last_fail", cfg)
+            send_text.assert_not_called()
+
+            cfg.update(report_mode="text", report_modules=["system"])
+            self.assertTrue(run_scheduled()["ok"])
+            send_text.assert_called_once()
+            self.assertEqual(send.call_count, 2)
+
     def _both(self):
         srv.notify_save(self.dir, {"channels": [
             _mail_ch(enabled=1, user="a@qq.com", to="b@qq.com", password="x"),

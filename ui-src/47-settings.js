@@ -752,12 +752,13 @@ function renderNotify(card) {
     setText(x.repTestLabel, isImage ? '图片测试' : '测试报告');
     if (lastReportMode !== f.report_mode) {
       lastReportMode = f.report_mode;
-      setText(x.hRepTest, isImage ? '测试检查七牛上传、公开读回和钉钉发送。定时报告仍使用文字。' : '使用已保存的文字报告设置发送测试');
+      setText(x.hRepTest, isImage ? '预览、测试推送和定时图片都使用已保存的卡片。图片推送通过已启用的钉钉群机器人发送。' : '使用已保存的文字报告设置发送测试');
     }
   }
   // 测试报告
   x.repTestBtn.addEventListener('click', async () => {
-    x.repTestBtn.disabled = true; setText(x.hRepTest, '正在发送测试报告…');
+    x.repTestBtn.disabled = true;
+    setText(x.hRepTest, f.report_mode === 'image' ? '正在生成并发送日报图…' : '正在发送测试报告…');
     try {
       const data = { report_mode: f.report_mode };
       if (f.report_mode === 'image') data.report_qiniu = Object.assign({}, f.report_qiniu);
@@ -800,8 +801,9 @@ function renderNotify(card) {
     syncReportFormat();
     syncRepSchVis();
     const schLabel = ({ hourly: '每小时整点', daily: `每天 ${sch.time || '08:00'}`, weekly: `每周${'一二三四五六日'[sch.weekday || 0]} ${sch.time || '08:00'}`, monthly: `每月 ${sch.day || 1} 日 ${sch.time || '08:00'}`, interval: `每 ${sch.interval_minutes || 60} 分钟` })[sch.type || 'daily'] || '每天';
+    const reportSummary = f.report_mode === 'image' ? '图片 · 钉钉' : `${f.report_modules.length} 个模块`;
     setText(x.hRep, +f.report_enabled
-      ? `已开启：${schLabel} 推送，${f.report_modules.length} 个模块`
+      ? `已开启：${schLabel} 推送，${reportSummary}`
       : '关闭：不发送定时汇总报告');
     const last = n.last || {};
     const failCh = last.channels ? Object.entries(last.channels).filter(([, v]) => v && !v.ok).map(([, v]) => v.err).filter(Boolean).join('；') : '';

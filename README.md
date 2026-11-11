@@ -1,14 +1,14 @@
 # 飞牛监控 fnMonitor · 自用分支
 
 <p>
-  <img alt="Version" src="https://img.shields.io/badge/version-2.42.5-blue">
+  <img alt="Version" src="https://img.shields.io/badge/version-2.42.7.2-blue">
   <img alt="fnOS" src="https://img.shields.io/badge/fnOS-x86%20%7C%20arm64-success">
   <img alt="License" src="https://img.shields.io/badge/license-MIT-orange">
 </p>
 
-基于 [MisiteQ/fnmonitor](https://github.com/MisiteQ/fnmonitor) 的飞牛监控自用分支，保留总览、历史趋势、存储、容器、虚拟机和通知等上游功能，并加入 UPS 能耗统计与日报图片预览。
+基于 [MisiteQ/fnmonitor](https://github.com/MisiteQ/fnmonitor) 的飞牛监控自用分支，保留总览、历史趋势、存储、容器、虚拟机和通知等上游功能，并加入 UPS 能耗统计与日报图片推送。
 
-- 当前源码版本：**v2.42.5**，以 [personal/main](https://github.com/hesgang/fnmonitor/tree/personal/main) 为自用维护分支；[main](https://github.com/hesgang/fnmonitor/tree/main) 跟踪上游。
+- 当前源码版本：**v2.42.7.2**，以 [personal/main](https://github.com/hesgang/fnmonitor/tree/personal/main) 为自用维护分支；[main](https://github.com/hesgang/fnmonitor/tree/main) 跟踪上游。
 - 作者：**Misite齊** · 贡献者：**[iqiuzixuan](https://github.com/iqiuzixuan)**（新界面、虚拟机、安全加固、回归测试）、**[ttkl9559-cell](https://github.com/ttkl9559-cell)**（SAS 硬盘 SMART、硬盘巡检与告警、iDRAC 带外监控）、**[mhduiy](https://github.com/mhduiy)**（硬盘温度刷新与 SMART 温度显示一致性修复）
 - 适用平台：fnOS **x86 + arm64**（最低系统版本 0.9.0）
 - 默认端口：**8777**（可改）
@@ -64,9 +64,11 @@
 
 进入 **设置 → 通知设置 → 定时推送报告**，选择 **图片** 并勾选所需的总览卡片。保存后点 **预览日报图**，即可用当前采集快照渲染 PNG。
 
-图片模式下的 **测试推送** 会将内置测试图上传至七牛，确认下载域名能读回后，通过已启用的钉钉群机器人发送。七牛的存储区域、空间名称、下载域名、图片目录和密钥在应用设置中填写。下载域名需能公开读取上传的图片。当前定时报告仍按文字发送。
+在通知设置中启用钉钉群机器人，并填写七牛云图床的存储区域、空间名称、下载域名、图片目录和密钥。下载域名需能公开读取上传的图片。
 
-预览需要与运行平台和架构匹配的 Chromium Headless Shell 和 ChromeDriver。可将两个可执行文件及其运行库放入 `app/report-runtime/` 后打包，或将环境变量 `FNMONITOR_REPORT_RUNTIME` 指向已准备好的运行目录。Linux 下可执行文件需有执行权限，中文渲染依赖系统字体。
+自 **v2.42.7.2** 起，图片模式下的 **测试推送** 和 **定时推送** 都按预览的方式渲染已保存的总览卡片。应用将日报图上传至七牛，确认下载域名能读回后，再通过已启用的钉钉群机器人发送。保存设置后可先点 **测试推送** 验证配置，启用定时报告后到点会自动发送。
+
+生成日报图需要与运行平台和架构匹配的 Chromium Headless Shell 和 ChromeDriver。可将两个可执行文件及其运行库放入 `app/report-runtime/` 后打包，或将环境变量 `FNMONITOR_REPORT_RUNTIME` 指向已准备好的运行目录。Linux 下可执行文件需有执行权限，中文渲染依赖系统字体。
 
 ## 安装
 

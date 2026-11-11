@@ -6346,7 +6346,7 @@ def notify_report_build(cfg, payload, now):
     return "\n".join(lines)
 
 
-def notify_report_tick(data_dir, config, snapshot, vms_monitor=None, db=None):
+def notify_report_tick(data_dir, config, snapshot, vms_monitor=None, db=None, *, send_image=None):
     """后台线程：采集 → 组装 → 发送定时报告。"""
     try:
         cfg = notify_load(data_dir)
@@ -6354,25 +6354,30 @@ def notify_report_tick(data_dir, config, snapshot, vms_monitor=None, db=None):
             return None
         if not any(c.get("enabled") for c in (cfg.get("channels") or [])):
             return None
-        # 天气不在 collector 快照里，单独取
-        extra = {}
-        if "weather" in (cfg.get("report_modules") or []):
-            try:
-                extra["weather"] = fetch_weather(config.get("weather_city") or "")
-            except Exception:
-                extra["weather"] = {}
-        # kWh / 电费同样不在快照里，用历史库现算
-        if "power" in (cfg.get("report_modules") or []):
-            ps = _report_power_stats(db, config)
-            if ps:
-                extra["power_stats"] = ps
-        payload = notify_report_collect(snapshot, data_dir, cfg, extra=extra, vms_monitor=vms_monitor)
         now = time.time()
-        body = notify_report_build(cfg, payload, now)
         prefix = cfg.get("notify_title_prefix") or "飞牛监控"
         subject = "[%s] 定时报告 · %s" % (prefix, time.strftime("%Y-%m-%d %H:%M", time.localtime(now)))
-        # 定时报告自身有「简略/详细」控制，绕过全局极简推送截断
-        ok, res = notify_send_all(cfg, subject, body, skip_minimal=True)
+        if cfg.get("report_mode") == "image":
+            result = (send_image(cfg, subject) if send_image else
+                      {"ok": False, "error": "日报图片发送服务不可用"})
+            ok, res = result["ok"], result.get("error")
+        else:
+            # 天气不在 collector 快照里，单独取
+            extra = {}
+            if "weather" in (cfg.get("report_modules") or []):
+                try:
+                    extra["weather"] = fetch_weather(config.get("weather_city") or "")
+                except Exception:
+                    extra["weather"] = {}
+            # kWh / 电费同样不在快照里，用历史库现算
+            if "power" in (cfg.get("report_modules") or []):
+                ps = _report_power_stats(db, config)
+                if ps:
+                    extra["power_stats"] = ps
+            payload = notify_report_collect(snapshot, data_dir, cfg, extra=extra, vms_monitor=vms_monitor)
+            body = notify_report_build(cfg, payload, now)
+            # 定时报告自身有「简略/详细」控制，绕过全局极简推送截断
+            ok, res = notify_send_all(cfg, subject, body, skip_minimal=True)
         # 回写 last_sent / last_fail
         try:
             cur = notify_load(data_dir)
@@ -6394,7 +6399,7 @@ def notify_report_tick(data_dir, config, snapshot, vms_monitor=None, db=None):
         return None
 
 
-def notify_report_schedule(data_dir, config, snapshot, vms_monitor=None, db=None):
+def notify_report_schedule(data_dir, config, snapshot, vms_monitor=None, db=None, *, send_image=None):
     """采集线程每轮调用：到点就起后台线程发报告，立刻返回。"""
     try:
         if _REPORT_JOB[0] is not None and _REPORT_JOB[0].is_alive():
@@ -6403,7 +6408,7 @@ def notify_report_schedule(data_dir, config, snapshot, vms_monitor=None, db=None
         if not _report_due(cfg):
             return False
         t = threading.Thread(target=notify_report_tick, args=(data_dir, config, snapshot, vms_monitor, db),
-                             name="fnm-report", daemon=True)
+                             kwargs={"send_image": send_image}, name="fnm-report", daemon=True)
         _REPORT_JOB[0] = t
         t.start()
         return True
@@ -10288,6 +10293,7 @@ class Collector(threading.Thread):
         self._cfg_dir = cfg_dir or data_dir  # config.json 固定读默认配置目录
         self.config = config
         self.updater = updater  # UpdateManager：自动检查更新（可为 None）
+        self.send_report_image = None
         self.vms = vms  # VmMonitor（由 App 共享注入）：定时报告勾选虚拟机时按需现采
         self.db = History(os.path.join(data_dir, "monitor.db"))
         self.latest = {}
@@ -10871,7 +10877,8 @@ class Collector(threading.Thread):
 
         # ---- 定时推送报告（按用户设定的周期汇总各模块数据推送）----
         try:
-            notify_report_schedule(self.data_dir, self.config, snapshot, vms_monitor=self.vms, db=self.db)
+            notify_report_schedule(self.data_dir, self.config, snapshot, vms_monitor=self.vms, db=self.db,
+                                   send_image=self.send_report_image)
         except Exception:
             traceback.print_exc()
 
@@ -11317,6 +11324,7 @@ class MonitorApp:
         self.updater = UpdateManager(data_dir)  # 在线更新（须先于 Collector 创建）
         self.vms = VmMonitor()   # 虚拟机：按需采集（只在打开虚拟机页时轮询）；共享给 Collector 供定时报告现采
         self.collector = Collector(data_dir, config, cfg_dir=self._cfg_dir, updater=self.updater, vms=self.vms)
+        self.collector.send_report_image = self._send_report_image
         self.www_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "www")
         self.db_path = os.path.join(data_dir, "monitor.db")
         self._weather_cache = None
@@ -12425,14 +12433,14 @@ class MonitorApp:
         ch = data.get("channel") if isinstance(data, dict) else ""
         return notify_test(self.data_dir, ch)
 
-    def api_notify_report_image(self):
+    def api_notify_report_image(self, cfg=None):
         """Render the bundled overview from local data without an HTTP round trip."""
         from utils.report_image import capture_png, image_groups, image_modules
 
         entry = self._static_entry("index.html")
         if entry is None:
             raise RuntimeError("安装包缺少首页文件")
-        modules = image_modules(notify_load(self.data_dir))
+        modules = image_modules(notify_load(self.data_dir) if cfg is None else cfg)
         if not modules:
             raise ValueError("请在图片模式勾选至少一个区块并保存")
         groups = image_groups(modules)
@@ -12478,38 +12486,40 @@ class MonitorApp:
             data[f"/api/history?metric={metric}&range={range_}"] = self.api_history(metric, range_)
         return capture_png(entry[0].decode("utf-8"), groups, data)
 
+    def _send_report_image(self, cfg, subject, *, draft=None, test=False):
+        from utils.report_qiniu import clean_config as clean_qiniu, upload_png, validate
+        qiniu = clean_qiniu(draft, cfg.get("report_qiniu"))
+        try:
+            validate(qiniu)
+            channels = [ch for ch in cfg.get("channels", [])
+                        if ch.get("enabled") and ch.get("type") == "dingtalk"
+                        and (ch.get("config") or {}).get("url")]
+            if not channels:
+                return {"ok": False, "error": "请先保存并启用钉钉群机器人渠道"}
+            png = self.api_notify_report_image(cfg)
+            url = upload_png(qiniu, png, test=test)
+        except (RuntimeError, ValueError) as exc:
+            return {"ok": False, "error": str(exc)}
+        except OSError:
+            return {"ok": False, "error": "无法读取日报图片渲染所需的文件"}
+        body = "![日报图](%s)" % url
+        failures = 0
+        for channel in channels:
+            ok, _ = notify_dingtalk_send(channel, subject, body, image_report=True)
+            failures += not ok
+        if failures:
+            return {"ok": False, "error": "七牛上传和读回通过，%d/%d 个钉钉渠道发送失败"
+                    % (failures, len(channels))}
+        return {"ok": True, "message": "七牛上传和读回通过，日报图已发送到钉钉"}
+
     def api_notify_report_test(self, data):
         """立刻发一条定时推送报告（测试用），用当前采集快照组装。"""
         cfg = notify_load(self.data_dir)
         mode = data.get("report_mode", cfg.get("report_mode")) if isinstance(data, dict) else cfg.get("report_mode")
         if mode == "image":
-            from utils.report_qiniu import clean_config as clean_qiniu, upload_png, validate
             draft = data.get("report_qiniu") if isinstance(data, dict) else None
-            qiniu = clean_qiniu(draft, cfg.get("report_qiniu"))
-            try:
-                validate(qiniu)
-                channels = [ch for ch in cfg.get("channels", [])
-                            if ch.get("enabled") and ch.get("type") == "dingtalk"
-                            and (ch.get("config") or {}).get("url")]
-                if not channels:
-                    return {"ok": False, "error": "请先保存并启用钉钉群机器人渠道"}
-                sample = os.path.join(os.path.dirname(__file__), "utils", "report_test.png")
-                with open(sample, "rb") as file:
-                    url = upload_png(qiniu, file.read(), test=True)
-            except (RuntimeError, ValueError) as exc:
-                return {"ok": False, "error": str(exc)}
-            except OSError:
-                return {"ok": False, "error": "安装包缺少测试图片"}
             subject = "[%s] 日报图测试" % (cfg.get("notify_title_prefix") or "飞牛监控")
-            body = "![日报测试图](%s)" % url
-            failures = 0
-            for channel in channels:
-                ok, _ = notify_dingtalk_send(channel, subject, body, image_report=True)
-                failures += not ok
-            if failures:
-                return {"ok": False, "error": "七牛上传和读回通过，%d/%d 个钉钉渠道发送失败"
-                        % (failures, len(channels))}
-            return {"ok": True, "message": "七牛上传和读回通过，测试图已发送到钉钉"}
+            return self._send_report_image(cfg, subject, draft=draft, test=True)
         snap = self.collector.get_snapshot() if self.collector else {}
         if not any(c.get("enabled") for c in (cfg.get("channels") or [])):
             return {"ok": False, "error": "没有已启用的推送渠道"}
