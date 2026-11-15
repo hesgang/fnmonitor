@@ -284,6 +284,30 @@ class DailySummarySimulationTest(unittest.TestCase):
             self.clock[0] = saved
 
 
+class PowerReportHistoryTest(unittest.TestCase):
+    def test_text_report_keeps_archived_monthly_energy_and_configured_rate(self):
+        now = datetime.datetime(2026, 9, 19, 12).timestamp()
+        old = datetime.datetime(2026, 9, 2, 12).timestamp()
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(srv.time, "time", return_value=now):
+            app = new_app(directory, power_rate_yuan=0)
+            db = app.collector.db
+            db.write([(old, "power", 600), (now - 60, "power", 120)])
+            db.cleanup(7, daily_target=now - 600, default_dt=60)
+            self.assertAlmostEqual(db.energy_kwh("power", now - old + 60), 0.002)
+            frame = {"power": {"ok": True, "source": "ups", "total": 26.1}}
+            app.collector.latest = frame
+            power_stats = app.api_power_stats()
+            cfg = dict(srv.NOTIFY_DEFAULT, report_modules=["power"])
+            report = srv.notify_report_collect(
+                frame, app.data_dir, cfg, extra={"power_stats": app._report_power_stats(frame)})["power"]
+            self.assertEqual(report["watts"], 26.1)
+            self.assertEqual(report["source"], "UPS 输出")
+            self.assertEqual(report["today_kwh"], 0.002)
+            self.assertEqual(report["month_kwh"], 0.012)
+            self.assertEqual(report["month_kwh"], power_stats["energy"]["month_kwh"])
+            self.assertEqual(report["month_yuan"], 0)
+
+
 # ---------------------------------------------------------------------------
 # Real-clock synthetic datasets
 # ---------------------------------------------------------------------------

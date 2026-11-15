@@ -227,7 +227,7 @@ CONTRACT_ENDPOINTS = [
 OPAQUE_PATHS = {
     "/api/overview": ["disks", "disks_detail", "net", "diskio", "power", "gpu", "memory", "docker", "modules",
                       "ports", "hardware", "raid", "raidcard", "fans", "apps", "sensors.temps", "sensors.fans",
-                      "sensors.volts", "temp.disks", "cpu.per_core", "system"],
+                      "sensors.volts", "temp.disks", "cpu.per_core", "system", "ups"],
     "/api/docker": ["containers"],
     "/api/vms": ["vms"],
     "/api/traffic": ["ifaces", "containers"],
@@ -235,6 +235,7 @@ OPAQUE_PATHS = {
 }
 # Keys that legitimately exist only on some hosts (compare-path syntax).
 OPTIONAL_KEYS = {
+    "/api/overview": ["$.ups"],         # only after the UPS poller publishes its state
     "/api/docker": ["$.sampled_at"],          # only when the docker CLI answered
 }
 MAX_DEPTH = 4

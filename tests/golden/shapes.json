@@ -223,6 +223,7 @@
    "system": "null"
   },
   "ts": "number",
+  "ups": "dict",
   "uptime": "number"
  },
  "/api/power_stats": {

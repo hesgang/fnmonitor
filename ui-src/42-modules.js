@@ -27,7 +27,7 @@ const TREND_DEFS = [
   { id: 'net', title: '网络', sheet: 'net', yMin: 0, yTick: shortBytes, series: [{ m: 'net.rx', label: '下行', color: M.io, fmt: F.rate }, { m: 'net.tx', label: '上行', color: M.io2, fmt: F.rate }] },
   { id: 'io', title: '磁盘读写', sheet: 'storage', yMin: 0, yTick: v => v + 'M', series: [{ m: 'diskio.r', label: '读取', color: M.io, fmt: fMBs }, { m: 'diskio.w', label: '写入', color: M.io2, fmt: fMBs }] },
   { id: 'temp', title: '温度', sheet: 'temp', yTick: v => v + '°', thresholds: () => [{ v: TH.tempWarn, lv: 'warn' }, { v: TH.tempCrit, lv: 'crit' }], series: [{ m: 'temp', label: 'CPU', color: M.temp, fmt: fDeg }, { m: 'temp_mb', label: '主板', color: M.temp2, fmt: fDeg }] },
-  { id: 'power', title: '整机功耗', sheet: 'power', yMin: 0, yTick: v => v + 'W', peak: true, series: [{ m: 'power', label: '功耗', color: M.pwr, fmt: fW }] },
+  { id: 'power', title: '功耗', sheet: 'power', yMin: 0, yTick: v => v + 'W', peak: true, series: [{ m: 'power', label: '功耗', color: M.pwr, fmt: fW }] },
   { id: 'fan', title: '风扇转速', sheet: 'temp', yMin: 0, yTick: v => String(v), series: [{ m: 'fan_avg', label: '平均转速', color: M.fan, fmt: fRpm }] },
 ];
 const chartOpt = (d, extra) => Object.assign({ series: d.series, yMin: d.yMin, yMax: d.yMax, yTick: d.yTick, peak: d.peak, thresholds: d.thresholds, empty: emptyFor(d.series[0].m) }, extra);

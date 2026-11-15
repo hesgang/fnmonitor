@@ -138,7 +138,7 @@ defineModule({
     const en = S.pstats && S.pstats.energy, co = S.pstats && S.pstats.cost;
     const pwrSrc = pw.source === 'idrac' ? `iDRAC 整机读数${pw.capacity ? ` · 电源容量 ${F.int(pw.capacity)} W` : ''}`
       : pw.source === 'rapl' ? '硬件 RAPL 读数' : pw.source === 'ups' ? 'UPS 输出功率' : '按部件模型估算';
-    setText(x.pwrSub, !has3 ? '无法读取或估算功耗' : en ? `今日 ${F.kwh(en.today_kwh)} kWh · ${F.yuan(co && co.today_yuan)}` : pwrSrc);
+    setText(x.pwrSub, !has3 ? '无法读取或估算功耗' : upsFallbackText(pw) || (en ? `今日 ${F.kwh(en.today_kwh)} kWh · ${F.yuan(co && co.today_yuan)}` : pwrSrc));
     m.sp.pwr.set([{ values: vals(S.live.power) }], { min: 0 });
   },
 });

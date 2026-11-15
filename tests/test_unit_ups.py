@@ -4,6 +4,7 @@
 Megatec 系、瓦力方程的 APC HID 兼容机型），不依赖真实 UPS 或 NUT 服务。
 """
 import os
+import time
 import unittest
 
 from fnm_support import load_server
@@ -193,3 +194,13 @@ def test_nut_targets_defaults():
     t = ups._nut_targets({})
     assert t[0] in ("127.0.0.1:3493", "localhost")
     assert any("127.0.0.1" in x for x in t)
+
+class UpsPowerStateTest(unittest.TestCase):
+    def test_energy_requires_fresh_valid_output(self):
+        sample = {"ok": True, "enabled": 1, "state": "ok", "ts": int(time.time()),
+                  "poll": 5, "live": {"out_w": 0}}
+        self.assertEqual(ups.ups_output_state(sample), "active")
+        self.assertEqual(ups.ups_output_state({**sample, "ts": sample["ts"] - 11}), "expired")
+        self.assertEqual(ups.ups_output_state({**sample, "stale": 1}), "unavailable")
+        self.assertEqual(ups.ups_output_state({**sample, "live": {"out_w": None}}), "missing")
+        self.assertEqual(ups.ups_output_state({"state": "off"}), "off")

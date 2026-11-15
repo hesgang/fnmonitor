@@ -975,9 +975,10 @@ class UpsPoller(threading.Thread):
             return
 
         # 通信恢复事件
+        recovered = []
         if self.down_since is not None:
             lost = int(time.time()) - self.down_since
-            ev = [{"ts": int(time.time()), "type": "DEVICE_BACK", "level": "ok",
+            recovered = [{"ts": int(time.time()), "type": "DEVICE_BACK", "level": "ok",
                    "label": UPS_EVENT_META["DEVICE_BACK"][0],
                    "ups": snap["device"].get("name") or "",
                    "from_st": self.down_at, "to_st": snap["live"].get("status") or "",
@@ -989,7 +990,6 @@ class UpsPoller(threading.Thread):
             self.down_since = None
             self.down_ticks = 0
             self.down_at = ""
-            self._notify_events(ev, snap, cfg)
 
         evs = ups_detect(self, snap)
         snap["state"] = "ok"
@@ -1002,6 +1002,8 @@ class UpsPoller(threading.Thread):
         snap["uptime"] = int(time.time()) - self.started
         self._publish(snap)
 
+        if recovered:
+            self._notify_events(recovered, snap, cfg)
         if evs:
             self._notify_events(evs, snap, cfg)
 
@@ -1025,6 +1027,7 @@ class UpsPoller(threading.Thread):
         if snap["live"]:
             snap["live"] = dict(snap["live"])
             snap["live"]["stale"] = 1
+        self._publish(snap)
         if self.down_since is None:
             self.down_since = now
             self.down_ticks = 0
@@ -1039,16 +1042,15 @@ class UpsPoller(threading.Thread):
             self._notify_events([ev], snap, ups_load(self.data_dir))
         else:
             self.down_ticks += 1
-        self._publish(snap)
 
     def _publish(self, snap):
         with _UPS_LOCK:
-            _UPS_LATEST.clear()
-            _UPS_LATEST.update(snap)
+            if not self._stop.is_set():
+                _UPS_LATEST.clear()
+                _UPS_LATEST.update(snap)
 
     def _publish_off(self):
-        with _UPS_LOCK:
-            _UPS_LATEST.clear()
+        self._publish({"ok": False, "enabled": 0, "state": "off", "ts": 0})
 
 
 # ---------------------------------------------------------------------------
@@ -1060,18 +1062,21 @@ def ups_latest():
         return dict(_UPS_LATEST)
 
 
-def ups_latest_output_w():
-    """返回最近的有效 UPS 输出瓦数，超期或缺失时返回 None。"""
-    snap = ups_latest()
+def ups_output_state(snap):
+    """Check whether this snapshot can supply energy accounting power."""
+    if not snap or snap.get("state") == "init":
+        return "pending"
+    if snap.get("state") == "off":
+        return "off"
     if not snap.get("ok") or not snap.get("enabled") or snap.get("stale"):
-        return None
+        return "unavailable"
     age = time.time() - snap["ts"]
     if not 0 <= age <= 2 * snap["poll"]:
-        return None
+        return "expired"
     watts = (snap.get("live") or {}).get("out_w")
-    if watts is not None and math.isfinite(watts) and watts >= 0:
-        return watts
-    return None
+    if watts is None or not math.isfinite(watts) or watts < 0:
+        return "missing"
+    return "active"
 
 
 def ups_public(cfg):
@@ -1121,10 +1126,13 @@ def ups_poller_ensure(data_dir, config):
                 _UPS_POLLER = None
             with _UPS_LOCK:
                 _UPS_LATEST.clear()
+                _UPS_LATEST.update(ok=False, enabled=0, state="off", ts=0)
             return None
         if _UPS_POLLER is not None and _UPS_POLLER.is_alive():
             _UPS_WAKE.set()
             return _UPS_POLLER
+        with _UPS_LOCK:
+            _UPS_LATEST.clear()
         _UPS_POLLER = UpsPoller(data_dir, config)
         _UPS_POLLER.start()
         return _UPS_POLLER

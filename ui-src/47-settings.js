@@ -1225,6 +1225,7 @@ function renderUps(card) {
       </div>
     </details>
     <div class="set-row"><div class="ctl" style="gap:8px"><button class="btn primary" type="button" data-ref="save">保存设置</button><span class="hint" data-ref="hMsg"></span></div></div>
+    <p class="hint" data-ref="energyPower" hidden></p>
     <div class="up-live" data-ref="live"></div>
     <div data-ref="diag" style="margin-top:10px"></div>
   `;
@@ -1289,6 +1290,14 @@ function renderUps(card) {
   let liveTimer = null;
   function renderLive() {
     API.get('/api/ups').then(d => {
+      const p = d && d.energy_power;
+      const pending = p && p.ups_requested != null && S.cfg && !!+S.cfg.power_use_ups !== p.ups_requested;
+      x.energyPower.hidden = !p || !(p.ok || p.ups_requested || pending);
+      if (!x.energyPower.hidden) {
+        const status = upsFallbackText(p) || SRC_TXT[p.source] || '功耗不可用';
+        setText(x.energyPower, pending ? '正在更新功耗来源'
+          : p.ok ? `计入能耗的功率 ${F.d1(p.total)} W · ${status}` : status);
+      }
       if (!d || d.state === 'off') {
         x.live.innerHTML = `<div class="note warn"><b>UPS 未启用</b>——开启上面的开关即可开始采集。<span class="faint">upsc 路径：${esc((d && d.upsc) || '未找到')}</span></div>`;
         return;
@@ -1302,7 +1311,7 @@ function renderUps(card) {
       const fld = (v, u, deci=0) => v != null ? `<b>${Number(v).toFixed(deci)}</b><small>${u}</small>` : '<b class="faint">—</b>';
       const grid = [
         ['输入电压', fld(lv.in_v, ' V', 1)], ['输出电压', fld(lv.out_v, ' V', 1)],
-        ['输出电流', fld(lv.out_a, ' A', 2)], ['输出功率', fld(lv.out_w, ' W', 1)],
+        ['输出电流', fld(lv.out_a, ' A', 2)], [d.output_state === 'expired' ? '上次输出功率（已过期）' : '设备输出功率', fld(lv.out_w, ' W', 1)],
         ['负载', fld(lv.load, '%', 0)], ['电量', fld(lv.chg, '%', 0)],
         ['剩余续航', lv.rt ? `<b>${Math.round(lv.rt/60)}</b><small>分钟</small>` : '<b class="faint">—</b>'],
         ['电池电压', fld(lv.bat_v, ' V', 2)], ['电池温度', fld(lv.temp, ' ℃', 1)],

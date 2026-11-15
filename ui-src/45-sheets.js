@@ -302,12 +302,13 @@ const SHEETS = {
         <div class="card pad" data-dc="pwr"><div class="stack" style="height:12px" data-ref="st"></div><div class="legend" data-ref="leg"></div></div><div data-ref="parts"></div>`;
       sheetCharts(ctx, b, [TREND_DEFS[4], { title: '累计用电（所选范围）', yMin: 0, yTick: v => v >= 10 ? F.kwh(v) : v >= 0.1 ? v.toFixed(2) : v.toFixed(3), series: [{ m: 'power', label: '累计', color: M.pwr, fmt: v => [F.kwh(v), 'kWh'] }], tf: cumKwh }]);
       b.insertAdjacentHTML('beforeend', `${sec('用电与电费', '<span class="faint" data-ref="rate"></span>')}<div data-ref="cost"></div>${sec('估算参数', '<button class="link-btn" type="button" data-goset="power">去设置</button>')}<div data-ref="est"></div>
-        <div class="note info">${ic('info')}<span>接了 iDRAC 时直接用电源实测的整机输出，这是最准的口径（含主板、内存、网卡与全部硬盘）。没有 iDRAC 才会退回 RAPL：它只测得 CPU 封装（与内存）功耗，整机值再叠加主板底座与活动硬盘的典型功耗；无 RAPL 时按 TDP × CPU 占用估算。休眠硬盘不计入。</span></div>`);
+        <div class="note info">${ic('info')}<span>启用 UPS 接入后，优先采用有效的 UPS 输出。其余情况下依次使用 iDRAC、RAPL 加部件估算、模型估算。趋势与电费沿用各时点实际记录的功耗。</span></div>`);
       const x = collect(b);
       b.addEventListener('click', e => { const g = e.target.closest('[data-goset]'); if (g) { closeSheet(); focusGroup(g.dataset.goset); } });
       return o => {
         const p = o.power || {}, has = pwrOk(o), ps = S.pstats || {};
         dnum(x.v, has ? p.total : null, F.d1); setText(x.src, has ? (p.source === 'idrac' ? 'iDRAC 整机实测' : p.source === 'rapl' ? 'RAPL 实测 + 底座 / 硬盘估算' : p.source === 'ups' ? SRC_TXT.ups : '模型估算（无 RAPL）') : '不可用');
+        if (upsFallbackText(p)) setText(x.src, upsFallbackText(p));
         const parts = has ? powerParts(p) : [];
         setHTML(x.st, parts.map(q => ppI(q[2])).join('')); parts.forEach((q, i) => { x.st.children[i].style.flexGrow = q[1].toFixed(2); });
         setHTML(x.leg, parts.map(([l, v, c]) => `<span>${ppI(c)}${esc(l)} <b>${F.d1(v)} W</b></span>`).join('') || '<span>无功耗数据</span>');
@@ -320,8 +321,9 @@ const SHEETS = {
           : p.source === 'ups' ? kvHTML([['UPS 输出功率', w(p.total)]])
           : kvHTML([['CPU 封装 Package', w(p.package)], ['　核心 Core', w(p.core)], ['　非核心 Uncore', w(p.uncore)], ['内存 DRAM', w(p.dram)], ['主板 / 其他底座', w(p.base)], [`活动硬盘${ok(p.disks_active) ? `（${p.disks_active} 块）` : ''}`, w(p.disks_w)]])) : '');
         const en = ps.energy || {}, co = ps.cost || {}, ep = ps.estimation_params;
+        const bootKwh = has && +o.uptime > 0 ? +p.total * +o.uptime / 3600000 : null;
         setText(x.rate, ok(co.rate_yuan_per_kwh) ? `电价 ${co.rate_yuan_per_kwh} 元/kWh` : '');
-        setHTML(x.cost, ps.energy ? kvHTML([['今日', `${F.kwh(en.today_kwh)} kWh · ${F.yuan(co.today_yuan)}`], ['本月', `${F.kwh(en.month_kwh)} kWh · ${F.yuan(co.month_yuan)}`], ['开机以来（按当前功率估）', `${F.kwh(en.boot_kwh)} kWh`]]) : `<div class="card pad">${emptyHTML('功耗统计加载中…')}</div>`);
+        setHTML(x.cost, ps.energy ? kvHTML([['今日', `${F.kwh(en.today_kwh)} kWh · ${F.yuan(co.today_yuan)}`], ['本月', `${F.kwh(en.month_kwh)} kWh · ${F.yuan(co.month_yuan)}`], ['开机以来（按当前功率估）', bootKwh == null ? '无数据' : `${F.kwh(bootKwh)} kWh`]]) : `<div class="card pad">${emptyHTML('功耗统计加载中…')}</div>`);
         setHTML(x.est, ep ? kvHTML([['CPU TDP（无 RAPL 时）', ep.tdp_w + ' W'], ['单盘典型功耗', ep.disk_typical_w + ' W'], ['网卡固定功耗', ep.nic_fixed_w + ' W'], ['主板 / 其他底座', ep.base_w + ' W']]) : '');
       };
     },

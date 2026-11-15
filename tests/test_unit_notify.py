@@ -7,6 +7,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -360,19 +361,25 @@ class NotifyTestEndpointTest(unittest.TestCase):
         channel = {"enabled": 1, "type": "dingtalk",
                    "config": {"url": "https://example.com/robot"}}
         cfg = dict(srv.NOTIFY_DEFAULT, report_mode="image", report_enabled=1,
-                   report_image_modules=["metric_power"], channels=[channel],
+                   report_image_modules=["metric_power", "power"], channels=[channel],
                    report_qiniu={"region": next(iter(report_qiniu.REGIONS)),
                                  "bucket": "example-bucket", "base_url": "https://images.example.com",
                                  "access_key": "test-access", "secret_key": "test-secret"})
         png = b"rendered-report-png"
         url = "https://images.example.com/report.png"
+        clock = time.time()
+        old = {"ts": clock - 3, "power": {"ok": True, "source": "rapl", "total": 30.1}}
+        ups = {"ts": clock - 2, "power": {"ok": True, "source": "ups", "total": 26.1}}
+        new = {"ts": clock - 1, "power": {"ok": True, "source": "estimated", "total": 35.0}}
+        app.collector.latest = old
+        app.api_overview()
+        app.api_power_stats()
+        app.collector.latest = ups
         with (
             mock.patch.object(srv, "notify_load", return_value=cfg),
             mock.patch.object(srv, "notify_send_all", return_value=(True, {})) as send_text,
-            mock.patch.object(app, "api_overview", return_value=b'{"ts": 123}'),
             mock.patch.object(app, "api_ui_get", return_value={}),
             mock.patch.object(app, "api_config", return_value={}),
-            mock.patch.object(app, "api_history", return_value={}),
             mock.patch.object(report_image, "capture_png", return_value=png) as render,
             mock.patch.object(report_qiniu, "upload_png", return_value=url) as upload,
             mock.patch.object(srv, "notify_dingtalk_send", return_value=(True, "")) as send,
@@ -382,7 +389,17 @@ class NotifyTestEndpointTest(unittest.TestCase):
             self.assertEqual(render.call_count, 2)
             preview_groups, test_groups = (call.args[1] for call in render.call_args_list)
             self.assertEqual(preview_groups, test_groups)
-            self.assertEqual([group["keep"] for group in test_groups], [['[data-m="pwr"]']])
+            self.assertEqual([group["keep"] for group in test_groups],
+                             [['[data-m="pwr"]'], ['.energy-live']])
+            for call in render.call_args_list:
+                data = call.args[2]
+                self.assertEqual(data["/api/overview"]["power"], ups["power"])
+                self.assertEqual(data["/api/power_stats"]["realtime"]["source"], "ups")
+                self.assertEqual(data["/api/power_stats"]["realtime"]["power_w"], 26.1)
+                self.assertEqual(data["/api/history?metric=power&range=1h"]["points"][-1], [ups["ts"], 26.1])
+            self.assertEqual(app.api_power(), ups["power"])
+            self.assertEqual(srv.json.loads(app.api_overview())["power"], ups["power"])
+            self.assertEqual(app.api_power_stats()["realtime"]["source"], "ups")
             upload.assert_called_once_with(cfg["report_qiniu"], png, test=True)
             self.assertIn(url, send.call_args.args[2])
             self.assertTrue(send.call_args.kwargs["image_report"])
@@ -392,13 +409,22 @@ class NotifyTestEndpointTest(unittest.TestCase):
             self.assertEqual(upload.call_count, 1)
             self.assertEqual(send.call_count, 1)
 
-            cfg["report_image_modules"] = ["metric_power"]
+            cfg["report_image_modules"] = ["metric_power", "power"]
+            app.collector.latest = new
+
             def run_scheduled():
-                return srv.notify_report_tick(self.dir, app.config, {}, send_image=app.collector.send_report_image)
+                return srv.notify_report_tick(
+                    self.dir, app.config, ups, send_image=app.collector.send_report_image,
+                    power_stats=app.collector.report_power_stats)
 
             self.assertTrue(run_scheduled()["ok"])
             upload.assert_called_with(cfg["report_qiniu"], png, test=False)
             self.assertEqual(render.call_args.args[1], preview_groups)
+            data = render.call_args.args[2]
+            self.assertEqual(app.api_power(), new["power"])
+            self.assertEqual(data["/api/overview"]["power"], ups["power"])
+            self.assertEqual(data["/api/power_stats"]["realtime"]["source"], "ups")
+            self.assertEqual(data["/api/daily?days=30"]["power_source"], "ups")
             self.assertIn("定时报告", send.call_args.args[1])
             send_text.assert_not_called()
             self.assertIn("report_last_sent", cfg)

@@ -5706,26 +5706,6 @@ def _fmt_uptime(sec):
     return "%d 分" % m
 
 
-def _report_power_stats(db, app_config):
-    """定时报告用的今日/本月能耗与电费：直接对功率历史积分（与功耗统计的 history 兜底口径一致）。"""
-    if db is None:
-        return {}
-    try:
-        import datetime
-        now = time.time()
-        d0 = datetime.datetime.now()
-        today_sec = now - datetime.datetime(d0.year, d0.month, d0.day).timestamp()
-        month_sec = now - datetime.datetime(d0.year, d0.month, 1).timestamp()
-        hist_dt = int((app_config or {}).get("history_interval", 60) or 60)
-        rate = float((app_config or {}).get("power_rate_yuan", 0.6) or 0.6)
-        today_kwh = db.energy_kwh("power", today_sec, default_dt=hist_dt)
-        month_kwh = db.energy_kwh("power", month_sec, default_dt=hist_dt)
-        return {"today_kwh": round(today_kwh, 4), "month_kwh": round(month_kwh, 4),
-                "today_yuan": round(today_kwh * rate, 2), "month_yuan": round(month_kwh * rate, 2)}
-    except Exception:
-        return {}
-
-
 def notify_report_collect(snapshot, data_dir, cfg, extra=None, vms_monitor=None):
     """从采集快照中按用户勾选的模块收集报告数据。
 
@@ -5920,6 +5900,10 @@ def notify_report_collect(snapshot, data_dir, cfg, extra=None, vms_monitor=None)
         payload["network"] = {"count": len(net_list), "interfaces": net_list}
     if "power" in mods:
         pwr = snap.get("power") or {}
+        ups_reason = {
+            "pending": "等待 UPS 采样", "off": "UPS 采集已关闭", "unavailable": "UPS 读数不可用",
+            "expired": "UPS 读数过期", "missing": "UPS 未提供有效输出功率",
+        }
         src_map = {"rapl": "RAPL 实测", "idrac": "iDRAC", "ups": "UPS 输出", "estimated": "模型估算", "unknown": "不可用"}
         # kWh / 电费不在采集快照里（快照只有实时瓦数），由调用方经 extra["power_stats"] 注入
         ps = extra.get("power_stats") or {}
@@ -5927,6 +5911,7 @@ def notify_report_collect(snapshot, data_dir, cfg, extra=None, vms_monitor=None)
             "watts": round(pwr.get("total") or pwr.get("watts") or pwr.get("power") or 0, 1),
             "source": src_map.get(pwr.get("source"), pwr.get("source") or "--"),
             "ok": bool(pwr.get("ok")),
+            "fallback": ups_reason.get(pwr.get("ups_state")) if pwr.get("ups_requested") and pwr.get("source") != "ups" else None,
             "today_kwh": round(pwr.get("today_kwh") or pwr.get("kwh_today") or ps.get("today_kwh") or 0, 3),
             "today_yuan": round(pwr.get("today_yuan") or pwr.get("yuan_today") or ps.get("today_yuan") or 0, 2),
             "month_kwh": round(ps.get("month_kwh") or 0, 3),
@@ -6237,10 +6222,12 @@ def notify_report_build(cfg, payload, now):
         _sec("🔌", "功耗与电费")
         if p.get("ok"):
             _kv("实时功耗", "%s W" % p.get("watts", "--"))
-            if detail:
+            if detail or p.get("fallback"):
                 _kv("数据来源", p.get("source", "--"))
         else:
             _kv("实时功耗", "无传感器（%s）" % p.get("source", "--"))
+        if p.get("fallback"):
+            _kv("UPS", p["fallback"])
         _kv("今日用电", "%s kWh · 电费 %s 元" % (p.get("today_kwh", "--"), p.get("today_yuan", "--")))
         if detail and (p.get("month_kwh") or p.get("month_yuan")):
             _kv("本月用电", "%s kWh · 电费 %s 元" % (p.get("month_kwh", "--"), p.get("month_yuan", "--")))
@@ -6346,7 +6333,7 @@ def notify_report_build(cfg, payload, now):
     return "\n".join(lines)
 
 
-def notify_report_tick(data_dir, config, snapshot, vms_monitor=None, db=None, *, send_image=None):
+def notify_report_tick(data_dir, config, snapshot, vms_monitor=None, *, send_image=None, power_stats=None):
     """后台线程：采集 → 组装 → 发送定时报告。"""
     try:
         cfg = notify_load(data_dir)
@@ -6358,7 +6345,7 @@ def notify_report_tick(data_dir, config, snapshot, vms_monitor=None, db=None, *,
         prefix = cfg.get("notify_title_prefix") or "飞牛监控"
         subject = "[%s] 定时报告 · %s" % (prefix, time.strftime("%Y-%m-%d %H:%M", time.localtime(now)))
         if cfg.get("report_mode") == "image":
-            result = (send_image(cfg, subject) if send_image else
+            result = (send_image(cfg, subject, snapshot=snapshot) if send_image else
                       {"ok": False, "error": "日报图片发送服务不可用"})
             ok, res = result["ok"], result.get("error")
         else:
@@ -6369,11 +6356,9 @@ def notify_report_tick(data_dir, config, snapshot, vms_monitor=None, db=None, *,
                     extra["weather"] = fetch_weather(config.get("weather_city") or "")
                 except Exception:
                     extra["weather"] = {}
-            # kWh / 电费同样不在快照里，用历史库现算
-            if "power" in (cfg.get("report_modules") or []):
-                ps = _report_power_stats(db, config)
-                if ps:
-                    extra["power_stats"] = ps
+            # 与首页共用今日及本月能耗口径。
+            if power_stats and "power" in (cfg.get("report_modules") or []):
+                extra["power_stats"] = power_stats(snapshot)
             payload = notify_report_collect(snapshot, data_dir, cfg, extra=extra, vms_monitor=vms_monitor)
             body = notify_report_build(cfg, payload, now)
             # 定时报告自身有「简略/详细」控制，绕过全局极简推送截断
@@ -6399,7 +6384,7 @@ def notify_report_tick(data_dir, config, snapshot, vms_monitor=None, db=None, *,
         return None
 
 
-def notify_report_schedule(data_dir, config, snapshot, vms_monitor=None, db=None, *, send_image=None):
+def notify_report_schedule(data_dir, config, snapshot, vms_monitor=None, *, send_image=None, power_stats=None):
     """采集线程每轮调用：到点就起后台线程发报告，立刻返回。"""
     try:
         if _REPORT_JOB[0] is not None and _REPORT_JOB[0].is_alive():
@@ -6407,8 +6392,8 @@ def notify_report_schedule(data_dir, config, snapshot, vms_monitor=None, db=None
         cfg = notify_load(data_dir)
         if not _report_due(cfg):
             return False
-        t = threading.Thread(target=notify_report_tick, args=(data_dir, config, snapshot, vms_monitor, db),
-                             kwargs={"send_image": send_image}, name="fnm-report", daemon=True)
+        t = threading.Thread(target=notify_report_tick, args=(data_dir, config, snapshot, vms_monitor),
+                             kwargs={"send_image": send_image, "power_stats": power_stats}, name="fnm-report", daemon=True)
         _REPORT_JOB[0] = t
         t.start()
         return True
@@ -10294,11 +10279,13 @@ class Collector(threading.Thread):
         self.config = config
         self.updater = updater  # UpdateManager：自动检查更新（可为 None）
         self.send_report_image = None
+        self.report_power_stats = None
         self.vms = vms  # VmMonitor（由 App 共享注入）：定时报告勾选虚拟机时按需现采
         self.db = History(os.path.join(data_dir, "monitor.db"))
         self.latest = {}
         self._lock = threading.Lock()
         self._stop = threading.Event()
+        self._wake = threading.Event()
         self._prev_cpu = None
         self._prev_cores = None
         self._prev_net = None
@@ -10346,6 +10333,10 @@ class Collector(threading.Thread):
 
     def stop(self):
         self._stop.set()
+        self.request_sample()
+
+    def request_sample(self):
+        self._wake.set()
 
     def _idrac_fast(self):
         """读 iDRAC「快组」缓存（由 IdracPoller 后台刷新）。
@@ -10432,7 +10423,11 @@ class Collector(threading.Thread):
             self._tick()
         except Exception:
             pass
-        while not self._stop.wait(self.config.get("interval", 10)):
+        while not self._stop.is_set():
+            self._wake.wait(self.config.get("interval", 10))
+            self._wake.clear()
+            if self._stop.is_set():
+                break
             try:
                 self._tick()
             except Exception:
@@ -10581,9 +10576,10 @@ class Collector(threading.Thread):
         # 注意口径：RAPL package 只是 CPU 封装功耗（Jasper Lake N5095 等 SoC 空闲
         # 仅 2-3W，且通常没有 DRAM 域），不等于整机功耗。整机 total = package
         # + dram + 主板等固定底座(power_base_w) + 活动硬盘数 * 单盘功耗，休眠盘不计。
-        use_ups_power = self.config.get("power_use_ups") and _UPS_AVAILABLE
-        # 每次实时采集复用 UPS 的最近有效快照。UPS 不可用时才走原有功耗来源。
-        ups_w = _ups_mod.ups_latest_output_w() if use_ups_power else None
+        use_ups_power = bool(self.config.get("power_use_ups"))
+        ups = _ups_mod.ups_latest() if _UPS_AVAILABLE else {}
+        ups_state = _ups_mod.ups_output_state(ups) if _UPS_AVAILABLE else "unavailable"
+        ups_w = ups["live"]["out_w"] if use_ups_power and ups_state == "active" else None
         try:
             if ups_w is None and (use_ups_power or not _skip("power")) and now - self._last_power_ts >= 10:
                 # 活动硬盘数：硬盘详情每 60 秒标注 state；未知(unknown)按活动计，
@@ -10639,9 +10635,16 @@ class Collector(threading.Thread):
                 self._last_power_ts = now
         except Exception:
             self._last_power = {"ok": False, "source": "unknown"}
-        snapshot["power"] = self._last_power if ups_w is None else {
-            "ok": True, "source": "ups", "total": ups_w,
-        }
+        power = self._last_power if ups_w is None else {"ok": True, "source": "ups", "total": ups_w}
+        snapshot["power"] = {**power, "ts": now, "ups_requested": use_ups_power,
+                             "ups_state": ups_state, "ups_ts": ups.get("ts")}
+        if ups:
+            device = ups.get("device") or {}
+            snapshot["ups"] = {
+                "ok": ups["ok"], "ts": ups["ts"], "state": ups["state"],
+                "device": {key: device.get(key) for key in ("name", "brand", "mfr", "model", "va")},
+                "live": ups.get("live") or {},
+            }
         # ---- GPU 实时（每 10 秒） ----
         try:
             if now - self._last_gpu_ts >= 10:
@@ -10718,9 +10721,8 @@ class Collector(threading.Thread):
             # ---- UPS 电源（历史维度） ----
             if _UPS_AVAILABLE:
                 try:
-                    _us = _ups_mod.ups_latest()
-                    if _us and _us.get("ok"):
-                        _lv = _us.get("live") or {}
+                    if ups.get("ok"):
+                        _lv = ups.get("live") or {}
                         for _k, _mk in (
                             ("out_w", "ups_out_w"), ("out_v", "ups_out_v"),
                             ("chg", "ups_chg"), ("load", "ups_load"),
@@ -10875,10 +10877,13 @@ class Collector(threading.Thread):
         except Exception:
             traceback.print_exc()
 
+        with self._lock:
+            self.latest = snapshot
+
         # ---- 定时推送报告（按用户设定的周期汇总各模块数据推送）----
         try:
-            notify_report_schedule(self.data_dir, self.config, snapshot, vms_monitor=self.vms, db=self.db,
-                                   send_image=self.send_report_image)
+            notify_report_schedule(self.data_dir, self.config, snapshot, vms_monitor=self.vms,
+                                   send_image=self.send_report_image, power_stats=self.report_power_stats)
         except Exception:
             traceback.print_exc()
 
@@ -10887,9 +10892,6 @@ class Collector(threading.Thread):
             threshold_notify_tick(self.data_dir, self.config, snapshot)
         except Exception:
             traceback.print_exc()
-
-        with self._lock:
-            self.latest = snapshot
 
     def get_snapshot(self):
         with self._lock:
@@ -11325,12 +11327,12 @@ class MonitorApp:
         self.vms = VmMonitor()   # 虚拟机：按需采集（只在打开虚拟机页时轮询）；共享给 Collector 供定时报告现采
         self.collector = Collector(data_dir, config, cfg_dir=self._cfg_dir, updater=self.updater, vms=self.vms)
         self.collector.send_report_image = self._send_report_image
+        self.collector.report_power_stats = self._report_power_stats
         self.www_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "www")
         self.db_path = os.path.join(data_dir, "monitor.db")
         self._weather_cache = None
         # ---- API 响应缓存：多客户端轮询时复用，避免重复查库 / 序列化（CPU 优化核心之一） ----
-        self._overview_bytes = b""
-        self._overview_ts = 0.0
+        self._overview_cache = None
         self._sysinfo_cache = None
         self._sysinfo_ts = 0.0
         self._hist_cache = {}
@@ -11339,7 +11341,6 @@ class MonitorApp:
         self._traffic_cache = None
         self._traffic_ts = 0.0
         self._power_stats_cache = None
-        self._power_stats_ts = 0.0
         self._daily_cache = {}   # days → (ts, 每日汇总)，60 秒复用
         self._disk_standby_cache = None
         self._disk_standby_ts = 0.0
@@ -12433,7 +12434,7 @@ class MonitorApp:
         ch = data.get("channel") if isinstance(data, dict) else ""
         return notify_test(self.data_dir, ch)
 
-    def api_notify_report_image(self, cfg=None):
+    def api_notify_report_image(self, cfg=None, *, snapshot=None):
         """Render the bundled overview from local data without an HTTP round trip."""
         from utils.report_image import capture_png, image_groups, image_modules
 
@@ -12445,23 +12446,22 @@ class MonitorApp:
             raise ValueError("请在图片模式勾选至少一个区块并保存")
         groups = image_groups(modules)
         selected = {group["id"] for group in groups}
-        overview = json.loads(self.api_overview())
-        ts = overview.get("ts")
-        if not ts:
+        snap = self.collector.get_snapshot() if snapshot is None else snapshot
+        if not snap.get("ts"):
             raise RuntimeError("尚无采集快照，请等首次采集完成后再试")
         data = {
-            "/api/overview": overview,
+            "/api/overview": self._overview_data(snap, time.time()),
             "/api/ui": self.api_ui_get(),
             "/api/config": self.api_config(),
         }
         if "storage" in selected:
             data["/api/disk_health"] = self.api_disk_health()
         if "energy" in selected:
-            data["/api/power_stats"] = self.api_power_stats()
+            data["/api/power_stats"] = self.api_power_stats(snapshot=snap)
         if "network" in selected:
             data["/api/traffic"] = self.api_traffic()
         if selected & {"energy", "network"}:
-            data["/api/daily?days=30"] = self.api_daily(30)
+            data["/api/daily?days=30"] = self.api_daily(30, snapshot=snap)
         if "hero" in selected:
             data["/api/weather"] = self.api_weather()
         if "procs" in selected:
@@ -12469,7 +12469,7 @@ class MonitorApp:
         if "monthly" in selected:
             data["/api/monthly_summary"] = self.api_monthly_summary()
         history = set()
-        if "energy" in selected and not (data["/api/daily?days=30"] or {}).get("days"):
+        if "energy" in selected:
             history.add(("power", "all"))
         if "network" in selected and not (data["/api/daily?days=30"] or {}).get("days"):
             history.add(("net", "all"))
@@ -12483,10 +12483,11 @@ class MonitorApp:
             history.update((metric, range_) for metric in
                            ("cpu", "mem", "net", "diskio", "temp", "temp_mb", "power", "fan_avg"))
         for metric, range_ in sorted(history):
-            data[f"/api/history?metric={metric}&range={range_}"] = self.api_history(metric, range_)
+            data[f"/api/history?metric={metric}&range={range_}"] = self.api_history(
+                metric, range_, snapshot=snap if metric == "power" else None)
         return capture_png(entry[0].decode("utf-8"), groups, data)
 
-    def _send_report_image(self, cfg, subject, *, draft=None, test=False):
+    def _send_report_image(self, cfg, subject, *, draft=None, test=False, snapshot=None):
         from utils.report_qiniu import clean_config as clean_qiniu, upload_png, validate
         qiniu = clean_qiniu(draft, cfg.get("report_qiniu"))
         try:
@@ -12496,7 +12497,7 @@ class MonitorApp:
                         and (ch.get("config") or {}).get("url")]
             if not channels:
                 return {"ok": False, "error": "请先保存并启用钉钉群机器人渠道"}
-            png = self.api_notify_report_image(cfg)
+            png = self.api_notify_report_image(cfg, snapshot=snapshot)
             url = upload_png(qiniu, png, test=test)
         except (RuntimeError, ValueError) as exc:
             return {"ok": False, "error": str(exc)}
@@ -12530,16 +12531,9 @@ class MonitorApp:
                 extra["weather"] = self.api_weather()
             except Exception:
                 extra["weather"] = {}
-        # kWh / 电费也不在此快照里，复用功耗统计（含每日汇总口径）
+        # 与首页共用今日及本月能耗口径。
         if "power" in (cfg.get("report_modules") or []):
-            try:
-                _ps = self.api_power_stats() or {}
-                _e, _c = _ps.get("energy") or {}, _ps.get("cost") or {}
-                if _e:
-                    extra["power_stats"] = {"today_kwh": _e.get("today_kwh"), "month_kwh": _e.get("month_kwh"),
-                                            "today_yuan": _c.get("today_yuan"), "month_yuan": _c.get("month_yuan")}
-            except Exception:
-                pass
+            extra["power_stats"] = self._report_power_stats(snap)
         try:
             payload = notify_report_collect(snap, self.data_dir, cfg, extra=extra, vms_monitor=self.vms)
             now = time.time()
@@ -12646,7 +12640,7 @@ class MonitorApp:
                     "upsc": "", "ups_list": []}
         cfg = _ups_mod.ups_load(self.data_dir)
         if not cfg.get("enabled"):
-            return _ups_mod.ups_off_snapshot(cfg)
+            return {**_ups_mod.ups_off_snapshot(cfg), "energy_power": self.api_power()}
         snap = _ups_mod.ups_latest()
         if not snap:
             snap = {"ok": False, "enabled": 1, "state": "init", "ts": 0,
@@ -12654,6 +12648,8 @@ class MonitorApp:
                     "device": {}, "live": {}, "ups_list": [], "poll": cfg.get("poll_interval")}
         snap["config"] = _ups_mod.ups_public(cfg)
         snap["upsc"] = _ups_mod._upsc_path()
+        snap["energy_power"] = self.api_power()
+        snap["output_state"] = _ups_mod.ups_output_state(snap)
         return snap
 
     def api_ups_save(self, data):
@@ -12666,6 +12662,8 @@ class MonitorApp:
         print("[fnmonitor] UPS 配置已更新：%s name=%s interval=%ss"
               % ("开" if cfg.get("enabled") else "关", cfg.get("ups_name") or "自动",
                  cfg.get("poll_interval") or 5))
+        if self.config.get("power_use_ups"):
+            self.collector.request_sample()
         return {"ok": True, "error": "", "config": _ups_mod.ups_public(cfg),
                 "message": "已保存" if cfg.get("enabled") else "已保存（UPS 未启用）"}
 
@@ -12770,20 +12768,18 @@ class MonitorApp:
         return idrac_sel(cfg, limit=max(1, min(limit, 100)))
 
     def api_overview(self):
-        """总览快照（返回预序列化 bytes，5 秒内多客户端复用同一份）。
-
-        轮询接口每 5 秒被每个打开的页面调用一次；快照本身每 interval 秒才更新，
-        序列化结果在更新周期内完全一致，直接复用可省掉每客户端的 json.dumps 与
-        system_info() 的 /proc 读取。"""
-        now = time.time()
-        if self._overview_bytes and now - self._overview_ts < 5:
-            return self._overview_bytes
+        """Serialize the latest frame, sharing the result only within that frame."""
         snap = self.collector.get_snapshot()
-        snap["system"] = self._cached_system_info(now)
-        snap["config"] = self._public_config()
-        self._overview_bytes = json.dumps(snap, ensure_ascii=False).encode("utf-8")
-        self._overview_ts = now
-        return self._overview_bytes
+        now = time.time()
+        cached = self._overview_cache
+        if cached and cached[0] == snap.get("ts") and now - cached[1] < 5:
+            return cached[2]
+        data = json.dumps(self._overview_data(snap, now), ensure_ascii=False).encode("utf-8")
+        self._overview_cache = (snap.get("ts"), now, data)
+        return data
+
+    def _overview_data(self, snapshot, now):
+        return {**snapshot, "system": self._cached_system_info(now), "config": self._public_config()}
 
     def _cached_system_info(self, now):
         if self._sysinfo_cache is None or now - self._sysinfo_ts >= 60:
@@ -12817,7 +12813,7 @@ class MonitorApp:
         """「全部」范围的时间跨度：按保留天数估算（用于计算降采样桶宽）。"""
         return seconds or max(1, int(self.config.get("retention_days", 7) or 7)) * 86400
 
-    def api_history(self, metric, range_):
+    def api_history(self, metric, range_, *, snapshot=None):
         """趋势查询（结果缓存 25 秒）。
 
         历史数据每 history_interval(默认 60) 秒才新增一个点；查询在 SQL 内按时间桶
@@ -12826,6 +12822,8 @@ class MonitorApp:
             return {"metric": "", "range": range_, "points": []}
         if range_ not in self._RANGE_SECONDS:
             range_ = "1h"
+        if snapshot is not None:
+            return self._api_history_impl(metric, range_, snapshot=snapshot)
         key = (metric, range_)
         now = time.time()
         cached = self._hist_cache.get(key)
@@ -12837,7 +12835,7 @@ class MonitorApp:
         self._hist_cache[key] = (now, data)
         return data
 
-    def _api_history_impl(self, metric, range_):
+    def _api_history_impl(self, metric, range_, *, snapshot=None):
         seconds = self._RANGE_SECONDS.get(range_, 3600)
         if metric == "net":
             return self.api_net_history(range_)
@@ -12851,7 +12849,13 @@ class MonitorApp:
         # 实时兜底：历史为空或最新点过旧时，附加当前实时值，保证趋势图始终有数据
         now = time.time()
         latest_ts = rows[-1][0] if rows else 0
-        if now - latest_ts > 60:
+        if snapshot is not None:
+            ts = snapshot["ts"]
+            rows = [(t, v) for t, v in rows if t < ts]
+            val = self._live_value(metric, snapshot)
+            if val is not None:
+                rows.append((ts, val))
+        elif now - latest_ts > 60:
             val = self._live_value(metric, self.collector.get_snapshot())
             if val is not None:
                 rows = list(rows) + [(now, val)]
@@ -13162,7 +13166,7 @@ class MonitorApp:
                 return {"ok": False, "error": "保存失败: %s" % e}, None
             self.config["auth_password_hash"] = h
             self.config["auth_enabled"] = 1
-            self._overview_bytes = b""
+            self._overview_cache = None
         print("[fnmonitor] 已通过 /api/auth/setup 初始化登录口令并启用登录保护（来源 %s）" % ip)
         self._revoke_other_sessions()
         sid, ma = self._create_session("(初始化)", "setup")
@@ -13401,6 +13405,7 @@ class MonitorApp:
             return {"ok": False, "error": str(e)}, 200, None
 
         # ---- 同步到内存，即时生效 ----
+        power_changed = "power_use_ups" in updates and self.config.get("power_use_ups") != updates["power_use_ups"]
         for k, v in updates.items():
             if k == "interval":
                 self.config[k] = max(2, int(v))
@@ -13412,7 +13417,10 @@ class MonitorApp:
                 self.config[k] = v
         for k in remove:
             self.config[k] = ""
-        self._overview_bytes = b""
+        self._overview_cache = None
+        self._power_stats_cache = None
+        if power_changed:
+            self.collector.request_sample()
         open_mode_changed = False
         new_mode = str(updates.get("open_mode", "")).lower()
         if new_mode in ("iframe", "url"):
@@ -13473,7 +13481,7 @@ class MonitorApp:
         return self.collector.get_snapshot().get("raidcard", {"type": "none", "label": "", "detail": ""})
 
     def api_power(self):
-        """实时功耗（RAPL）。"""
+        """返回采集器选定的实时功耗。"""
         return self.collector.get_snapshot().get("power", {"ok": False})
 
     def api_traffic(self):
@@ -13560,42 +13568,18 @@ class MonitorApp:
         self._traffic_ts = now
         return result
 
-    def api_power_stats(self):
+    def api_power_stats(self, *, snapshot=None):
         """功耗统计：实时功耗 + kWh 能耗 + 电费 + 硬盘休眠状态。"""
         now = time.time()
-        if self._power_stats_cache and now - self._power_stats_ts < 5:
-            return self._power_stats_cache
-        snap = self.collector.get_snapshot()
+        snap = self.collector.get_snapshot() if snapshot is None else snapshot
+        stamp = snap.get("ts")
+        cached = self._power_stats_cache
+        if cached and cached[0] == stamp and now - cached[1] < 5:
+            return cached[2]
         power = snap.get("power", {"ok": False})
         source = power.get("source", "unknown")
         power_w = power.get("total", 0) if power.get("ok") else 0
-        # kWh 计算：从 power 历史积分
-        hist_interval = int(self.config.get("history_interval", 60))
-        import datetime
-        _now = datetime.datetime.now()
-        today_start = datetime.datetime(_now.year, _now.month, _now.day).timestamp()
-        month_start = datetime.datetime(_now.year, _now.month, 1).timestamp()
-        today_sec = now - today_start
-        month_sec = now - month_start
-        def _kwh_from_history(seconds):
-            # SQL 聚合整个区间（旧版受 query 默认 LIMIT 7200 限制，月初 5 天后本月 kWh 偏低）
-            return self.collector.db.energy_kwh("power", seconds, default_dt=hist_interval)
-        # 优先用每日汇总（与「近 30 天用电」柱同源；本月合计不受 retention_days 截断），
-        # 汇总不可用时回退为直接对保留期内的功率历史积分
-        dm = self._daily_today_month()
-        if dm and dm["has_power"]:
-            today_kwh = round(dm["today_kwh"] or 0.0, 4)
-            month_kwh = round(dm["month_kwh"] or 0.0, 4)
-            energy_basis = "daily"
-        else:
-            today_kwh = _kwh_from_history(today_sec)
-            month_kwh = _kwh_from_history(month_sec)
-            energy_basis = "history"
-        # 开机累计估算
-        uptime = snap.get("uptime", 0)
-        boot_kwh = round(power_w * uptime / 3_600_000, 4) if uptime > 0 else 0.0
-        # 电费
-        rate = float(self.config.get("power_rate_yuan", 0.6))
+        energy, cost = self._energy_totals(snap, now)
         # 硬盘休眠状态（60s 缓存），并与「硬盘信息」(lsblk 物理盘) 校对，只保留物理硬盘
         if now - self._disk_standby_ts >= 60:
             self._disk_standby_cache = read_disk_standby_states()
@@ -13606,15 +13590,16 @@ class MonitorApp:
             standby = [d for d in standby if d.get("name") in phy_names]
         result = {
             # 整机口径：RAPL 模式下 power_w = CPU 封装 + DRAM + 主板等固定底座 + 活动硬盘
-            "realtime": {"power_w": power_w, "source": source,
+            "realtime": {"power_w": power_w, "source": source, "ts": stamp,
+                         "ups_requested": power.get("ups_requested"),
+                         "ups_state": power.get("ups_state"), "ups_ts": power.get("ups_ts"),
                          "package": power.get("package", 0), "core": power.get("core", 0),
                          "dram": power.get("dram", 0),
                          "base": power.get("base"),
                          "disks_w": power.get("disks_w", 0),
                          "disks_active": power.get("disks_active")},
-            "energy": {"today_kwh": today_kwh, "month_kwh": month_kwh, "boot_kwh": boot_kwh,
-                       "basis": energy_basis},
-            "cost": {"today_yuan": round(today_kwh * rate, 2), "month_yuan": round(month_kwh * rate, 2), "rate_yuan_per_kwh": rate},
+            "energy": energy,
+            "cost": cost,
             "disks": standby,
             "standby_protect": bool(int(self.config.get("disk_standby_protect", 1) or 0)),
             "estimation_params": {
@@ -13624,9 +13609,58 @@ class MonitorApp:
                 "base_w": float(self.config.get("power_base_w", 8)),
             },
         }
-        self._power_stats_cache = result
-        self._power_stats_ts = now
+        self._power_stats_cache = (stamp, now, result)
         return result
+
+    def _report_power_stats(self, snapshot):
+        try:
+            energy, cost = self._energy_totals(snapshot, time.time())
+            return {**energy, **cost}
+        except Exception:
+            traceback.print_exc()
+            return {}
+
+    def _energy_totals(self, snap, now):
+        # kWh 计算：从 power 历史积分
+        hist_interval = int(self.config.get("history_interval", 60))
+        import datetime
+        _now = datetime.datetime.fromtimestamp(now)
+        today_start = datetime.datetime(_now.year, _now.month, _now.day).timestamp()
+        month_start = datetime.datetime(_now.year, _now.month, 1).timestamp()
+        today_sec = now - today_start
+        month_sec = now - month_start
+        def _kwh_from_history(seconds):
+            # SQL 聚合整个区间（旧版受 query 默认 LIMIT 7200 限制，月初 5 天后本月 kWh 偏低）
+            return self.collector.db.energy_kwh("power", seconds, default_dt=hist_interval)
+        # 优先用每日汇总（与「近 30 天用电」柱同源；本月合计不受 retention_days 截断），
+        # 汇总不可用时回退为直接对保留期内的功率历史积分
+        dm = self._daily_today_month(snapshot=snap)
+        if dm and dm["has_month_power"]:
+            today_kwh = dm["today_kwh"]
+            if today_kwh is None:
+                today_kwh = _kwh_from_history(today_sec)
+            if dm["archived_until"] is None:
+                # 首次归档前，每日汇总只实时积分今天。
+                month_kwh = _kwh_from_history(month_sec)
+            else:
+                month_kwh = round(dm["month_kwh"] + (today_kwh if dm["today_kwh"] is None else 0), 4)
+            energy_basis = "daily"
+        else:
+            today_kwh = _kwh_from_history(today_sec)
+            month_kwh = _kwh_from_history(month_sec)
+            energy_basis = "history"
+        # 开机累计估算
+        power = snap.get("power") or {}
+        power_w = power.get("total", 0) if power.get("ok") else 0
+        uptime = snap.get("uptime", 0)
+        boot_kwh = round(power_w * uptime / 3_600_000, 4) if uptime > 0 else 0.0
+        # 电费
+        rate = float(self.config.get("power_rate_yuan", 0.6))
+        return (
+            {"today_kwh": today_kwh, "month_kwh": month_kwh, "boot_kwh": boot_kwh, "basis": energy_basis},
+            {"today_yuan": round(today_kwh * rate, 2), "month_yuan": round(month_kwh * rate, 2),
+             "rate_yuan_per_kwh": rate},
+        )
 
     def _daily_data(self, days):
         """每日汇总（60 秒缓存；多客户端 / 多面板共用）。"""
@@ -13642,12 +13676,12 @@ class MonitorApp:
         self._daily_cache[days] = (now, data)
         return data
 
-    def api_daily(self, days=30):
+    def api_daily(self, days=30, *, snapshot=None):
         """近 N 天（含今天，本地自然日）的每日汇总：用电 kWh / 电费 / 物理网口流量 / CPU。
 
         days 列表按日期升序、每天一项；某项没有任何数据时该字段为 null（不是 0），
         has_data=false 表示当天完全没有采样（未运行 / 早于安装）。
-        kwh 为功率历史积分（RAPL 实测或模型估算，与能耗面板同源）；power_h 为当天有功率数据
+        kwh 为所选功耗来源的历史积分（与能耗面板同源）；power_h 为当天有功率数据
         覆盖的小时数，< 24 表示当天数据不完整。rx/tx 口径与流量统计一致：排除 lo，
         traffic_exclude_bridge 开启时排除 docker/veth 等虚拟网口。"""
         try:
@@ -13684,22 +13718,23 @@ class MonitorApp:
                 "cpu_avg": round(d.get("cpu_sum", 0.0) / n, 1) if n else None,
                 "cpu_max": round(d["cpu_max"], 1) if n and "cpu_max" in d else None,
             })
+        snap = self.collector.get_snapshot() if snapshot is None else snapshot
         return {"days": out, "rate": rate, "today": out[-1]["day"] if out else None,
                 "exclude_bridge": exclude_bridge, "missing": "null",
                 "archived_until": meta.get("archived_until"),
-                "power_source": (self.collector.get_snapshot().get("power") or {}).get("source")}
+                "power_source": (snap.get("power") or {}).get("source")}
 
-    def _daily_today_month(self):
+    def _daily_today_month(self, *, snapshot=None):
         """今日 / 本月合计（来自每日汇总，不受 retention 影响）。读不到返回 None。"""
         try:
             now = time.time()
             mday = time.localtime(now).tm_mday
-            j = self.api_daily(max(mday, 1))
+            j = self.api_daily(max(mday, 1), snapshot=snapshot)
         except Exception:
             traceback.print_exc()
             return None
         days = j.get("days") or []
-        if not days or not days[-1].get("has_data"):
+        if not days:
             return None
         month = time.strftime("%Y-%m-", time.localtime(now))
         mine = [d for d in days if d["day"].startswith(month)]
@@ -13708,7 +13743,9 @@ class MonitorApp:
         return {"today_kwh": t.get("kwh"), "month_kwh": sm("kwh"),
                 "today_rx": t.get("rx"), "today_tx": t.get("tx"),
                 "month_rx": sm("rx"), "month_tx": sm("tx"),
-                "has_power": t.get("kwh") is not None, "has_net": t.get("rx") is not None}
+                "has_power": t.get("kwh") is not None, "has_net": t.get("rx") is not None,
+                "has_month_power": any(d.get("kwh") is not None for d in mine),
+                "archived_until": j.get("archived_until")}
 
     def api_net_bytes_history(self, range_):
         """各网卡累计字节时间序列（聚合 net_rx_bytes:* / net_tx_bytes:*，SQL 内降采样）。"""
@@ -14047,7 +14084,7 @@ def _metric_label(m):
     return {
         "cpu": "CPU 使用率 %", "mem": "内存占用 %", "load1": "系统负载",
         "disk_total": "磁盘占用 %", "temp": "CPU 温度 °C", "temp_mb": "主板温度 °C",
-        "power": "整机功耗 W", "fan_avg": "风扇平均 RPM", "net_rx": "网络下行", "net_tx": "网络上行",
+        "power": "功耗 W", "fan_avg": "风扇平均 RPM", "net_rx": "网络下行", "net_tx": "网络上行",
     }.get(m, m)
 
 
